@@ -14,8 +14,10 @@ import { CameraUniform, makeCameraRay } from './camera.ts';
 import {
   GBuffer,
   PREPASS_TILE,
+  layerIndex,
   prepassReadLayout,
   prepassWriteLayout,
+  type RenderLayer,
 } from './gbuffer.ts';
 
 /** Safety factor on the tile cone's half-angle. Undershooting punches holes in silhouettes. */
@@ -26,6 +28,16 @@ export interface RaymarcherOptions extends TracerOptions {
   prepassSteps?: number;
   /** Palette length, needed as a JS constant for the fractional-id lookup. */
   paletteCount: number;
+  /**
+   * Which G-buffer layer this marcher fills. Defaults to `opaque`.
+   *
+   * A `transparent` marcher is the same trace against a different field, into the second
+   * layer's attachments, sharing the opaque layer's depth buffer - so a see-through
+   * surface behind a wall fails the depth test and costs nothing further. It also reads
+   * and writes its own pre-pass slot, because a pre-pass `t` is only a lower bound for
+   * the field it was traced against.
+   */
+  layer?: RenderLayer;
 }
 
 /**
@@ -44,9 +56,11 @@ export interface RaymarcherOptions extends TracerOptions {
  */
 export class SdfRaymarcher {
   readonly gbuffer: GBuffer;
+  readonly layer: RenderLayer;
   private readonly prepassPipeline: TgpuComputePipeline;
   private readonly primaryPipeline: TgpuRenderPipeline;
   private readonly field: TracedField;
+  private readonly slot: 0 | 1;
 
   constructor(
     root: TgpuRoot,
@@ -58,6 +72,8 @@ export class SdfRaymarcher {
   ) {
     this.field = field;
     this.gbuffer = gbuffer;
+    this.layer = options.layer ?? 'opaque';
+    this.slot = layerIndex(this.layer);
     const ray = makeCameraRay(camera);
     /** Tangent of the angle between the tile's axis and the ray through `uv`. */
     const cornerTan = (axis: d.v3f, uv: d.v2f) => {
@@ -163,7 +179,7 @@ export class SdfRaymarcher {
   /** Coarse cone-trace pre-pass. Records its own compute pass into `encoder`. */
   prepass(encoder: TgpuCommandEncoder): void {
     const t = this.gbuffer.current;
-    let p = this.prepassPipeline.with(encoder).with(t.prepassWriteGroup);
+    let p = this.prepassPipeline.with(encoder).with(t.prepassWriteGroups[this.slot]!);
     for (const g of this.field.groups) {
       p = p.with(g);
     }
@@ -176,7 +192,7 @@ export class SdfRaymarcher {
    * traced world.
    */
   draw(pass: TgpuRenderCommands): void {
-    let p = this.primaryPipeline.with(pass).with(this.gbuffer.current.prepassReadGroup);
+    let p = this.primaryPipeline.with(pass).with(this.gbuffer.current.prepassReadGroups[this.slot]!);
     for (const g of this.field.groups) {
       p = p.with(g);
     }

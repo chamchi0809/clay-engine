@@ -21,7 +21,9 @@ Requires a browser with WebGPU (Chrome 113+, Safari 18+).
 
 URL flags for diagnosing the renderer: `#debug=shadow|ao|normal|material|taa`,
 `#alpha=1` (temporal filter off), `#aoSteps=`, `#aoDistance=`, `#shadowSteps=`,
-`#page=`.
+`#page=`. For the water's transparency: `#tdebug=thickness|refraction|transmitted|surface`,
+`#opacity=1` (solid water again, the A/B every transparency artefact wants),
+`#absorption=`, `#thickness=`.
 
 What a game looks like:
 
@@ -76,6 +78,7 @@ Sebastian Aaltonen's GDC 2018 talk is the reference; slide numbers are from that
 | Particles → SDF, `atomicMin` union of spheres, one splat per mip | 57-59 | `lib/src/sim/splat.ts` |
 | SPH fluid, baked back into an SDF and unioned with the world | 55-60 | `lib/src/sim/fluid.ts` |
 | Fluid erosion of the world | 60 | `Fluid.contacts()` + `demo/src/main.ts` |
+| Transparency: second G-buffer layer, screen-space refraction, Beer-Lambert | - | `lib/src/render/composite.ts` |
 | Puzzle pages: roll, squeeze, erode; goal pads | - | `demo/src/levels.ts` |
 
 `SplatField` is the shared half of the last two rows. The fluid and the clay body bake
@@ -91,6 +94,63 @@ band a volume reads as saturated, i.e. exactly `band * voxel`. Anything using th
 as a *collider* rather than as something to look at needs `band * voxel` to exceed its
 own test radius, or it sees a contact everywhere inside the box and resolves it along a
 gradient that is flat there.
+
+## Transparency
+
+Not in the deck - Claybook's water is opaque - but the same argument decides where it
+goes. The renderer knows a scene as one distance field with a material channel, not as a
+list of things, so transparency is three fields on `Material` (`opacity`, `ior`,
+`absorption`) rather than a kind of object. Give the palette entry an `opacity` below 1
+and every kind of object gets it at once: an authored `solid`, a rasterised `softBody`, a
+`fluid` bake, and anything a third party writes against `Entity`.
+
+The one flag that is not a material is `Entity.transparent`, because it decides which
+*pass* an object is drawn in and a pass is chosen when pipelines are built. `fluid` and
+`softBody` default it from their material - one material each, so there is an answer -
+and `solid` defaults to false, since a level is one field over many materials and there
+is nothing to read an answer off.
+
+What it costs is a second G-buffer layer:
+
+```
+pre-pass, G-buffer, lighting, resolve        <- opaque, exactly as before
+G-buffer (layer 2)                           <- nearest see-through surface, shared depth
+composite                                    <- refract, absorb, reflect, blend
+```
+
+A see-through surface needs the *radiance* behind it, and by the time the deferred resolve
+has run that radiance already exists - shaded, denoised and temporally filtered - in the
+history target the resolve just wrote. So refraction is a projection rather than a second
+trace: bend the view ray at the surface, walk it as far as the body is thick, project that
+point back to the screen, read the resolved image there. Path length comes free from the
+gap between the two layers along one ray, which is what lets absorption be a length
+integral - a puddle is clear at its feathered edge and blue in the middle - and the layer
+sharing the opaque depth buffer means anything hidden behind a wall is culled before it is
+shaded.
+
+Three limits follow from that, and are the reason it is cheap:
+
+- **One layer.** Two panes in a line show the nearer one, not each other.
+- **Only what the opaque image already contains can refract into view.** A bent ray that
+  should reveal something off-screen, behind a foreground object, or past a silhouette
+  into open sky falls back to the straight lookup instead of inventing it. Refracting the
+  sky just past the edge of a plate into a puddle is what that check exists to stop.
+- **A transparent object casts no shadow, occludes nothing and bounces no light.** It is
+  not in the field the shadow, AO and reflection terms trace against - deliberately: clear
+  water that casts a solid shadow is the worse artefact.
+
+The composite runs downstream of the temporal filter, so it has nothing to average noise
+into, so its two lighting terms are deterministic - one hard shadow ray and one wide cone
+straight up the normal (`hardShadow`, `axisAO`). A stochastic estimator there would be
+salt-and-pepper on every pane of glass.
+
+Path length is also the honest weak point. Measured to the *backdrop* it over-estimates
+whenever the backdrop is far - a hand's width of falling water in front of a distant wall
+measures as metres and goes black - so `transparency.thickness` caps it and doubles as the
+value assumed against open sky. The exact answer is a second trace through the
+transparency layer's own field, which this pass cannot afford: a field costs a bind group,
+the composite already uses all four, and a rasterised transparent object has no field to
+trace at all.
 
 The soft body is rasterised rather than traced, which is what Claybook did. The deck is
 explicit: "Index buffer for triangle rendering / All meshes drawn with a single indirect
@@ -220,6 +280,7 @@ interface Entity {
   readonly field?: TracedField | null;   // this object as a distance field
   readonly traced?: boolean;             // does the renderer draw it?      default true
   readonly collidable?: boolean;         // can anything else hit it?       default true
+  readonly transparent?: boolean;        // drawn see-through?              default false
   build?(ctx: EntityContext): void;      // create pipelines
   simulate?(pass: TgpuComputePass): void;
   drawGeometry?(pass: TgpuRenderCommands): void;
@@ -235,11 +296,12 @@ frame after the entity set last changed. That lazy rebuild is what makes spawnin
 boot possible, and `despawn` possible at all, and it means a level can be built in
 whatever order reads best.
 
-`traced` and `collidable` are separate flags because the two roles differ. A soft body is
-`collidable` but not `traced`: it rasterises itself as triangles. A fluid is `traced` but
-not `collidable`, since its own bake is not something to bounce off. Leaving `traced` on
-costs a bind group (WebGPU allows four) and a texture sample on every primary, shadow and
-AO ray.
+`traced`, `collidable` and `transparent` are separate flags because the three roles
+differ. A soft body is `collidable` but not `traced`: it rasterises itself as triangles. A
+fluid is `traced` but not `collidable`, since its own bake is not something to bounce off.
+The demo's water is all three at once. Leaving `traced` on costs a bind group (WebGPU
+allows four) and a texture sample on every primary, shadow and AO ray; `transparent` costs
+a whole extra layer, and a scene with nothing see-through in it pays none of it.
 
 `SdfScene` is the same wiring one level down, for code that wants the pass order without
 the object model. `examples/analytic` uses it, and so does anyone tracing a field that is
@@ -267,7 +329,7 @@ it is playing the part of a third party bringing its own SDF primitives.
 
 ## Tests
 
-`pnpm test` runs 30 unit tests. They are JS mirrors of the parts where being wrong is
+`pnpm test` runs 42 unit tests. They are JS mirrors of the parts where being wrong is
 silent rather than loud: the sphere-tracing step rule and its interpolation slack, the
 surface-nets edge/quad enumeration, the SPH neighbour search and its rest density, the
 fixed-point encoding that turns `atomicMin` into a distance union, the brush-fold identity

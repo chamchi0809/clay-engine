@@ -30,6 +30,7 @@ export * from './trace/march.ts';
 export * from './trace/shade.ts';
 
 export * from './render/camera.ts';
+export * from './render/composite.ts';
 export * from './render/deferred.ts';
 export * from './render/gbuffer.ts';
 export * from './render/raymarch.ts';

@@ -9,6 +9,9 @@ const errorBox = document.getElementById('error') as HTMLElement;
 // `#debug=ao`, `#alpha=1`, `#aoSteps=4`, `#page=2` - freeze a lighting term, disable
 // temporal accumulation, retune a knob, or boot straight into a page. Diagnosing a
 // raymarcher without these is guesswork.
+//
+// `#opacity=1` makes the water solid again, which is the A/B every transparency artefact
+// wants: if it is still there with solid water, transparency is not what is wrong.
 const flags = new URLSearchParams(location.hash.slice(1));
 const num = (k: string) => (flags.has(k) ? Number(flags.get(k)) : undefined);
 
@@ -21,7 +24,22 @@ async function main() {
       clay: { albedo: [0.78, 0.44, 0.36], roughness: 0.75, emissive: [0, 0, 0], metallic: 0 },
       stone: { albedo: [0.66, 0.64, 0.6], roughness: 0.85, emissive: [0, 0, 0], metallic: 0 },
       gold: { albedo: [0.92, 0.74, 0.28], roughness: 0.25, emissive: [0.12, 0.08, 0.01], metallic: 0.9 },
-      water: { albedo: [0.24, 0.5, 0.78], roughness: 0.08, emissive: [0, 0, 0], metallic: 0.2 },
+      // The one see-through material in the game. `opacity` is what puts the liquid in
+      // the transparency layer at all; `absorption` is why a puddle is clear at its
+      // feathered edge and deep blue in the middle of the pool, since it is absorbed per
+      // unit travelled rather than applied as a flat tint.
+      water: {
+        albedo: [0.24, 0.5, 0.78],
+        // 0.22, not the 0.06 real water has: the surface is a field of small spheres, so
+        // at mirror roughness a large fraction of pixels sit near the sun's specular peak
+        // and the pool reads as white haze rather than as water. Spreading the highlight
+        // is the cheap fix; the expensive one is a smoother surface bake.
+        roughness: 0.22,
+        metallic: 0.2,
+        opacity: num('opacity') ?? 0.2,
+        ior: 1.33,
+        absorption: num('absorption') ?? 1.4,
+      },
     },
     bounds: BOUNDS,
     shading: {
@@ -35,6 +53,15 @@ async function main() {
       shadowMinMip: num('shadowMinMip'),
       filterRadius: num('filterRadius'),
       taaClamp: num('taaClamp'),
+    },
+    transparency: {
+      // `#tdebug=thickness|refraction|transmitted|surface|normal|material`.
+      debug: (flags.get('tdebug') ?? 'off') as 'off',
+      // The deepest the water ever pools on a page. Both what absorption assumes when
+      // there is no floor behind the liquid to measure against - a drop falling past the
+      // edge of the plate - and the cap on what is measured, without which the falling
+      // column reads as metres of water wherever a far wall happens to be behind it.
+      thickness: num('thickness') ?? 1.2,
     },
   });
 

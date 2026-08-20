@@ -13,25 +13,88 @@ export const DirLight = d.struct({
 });
 export type DirLightValue = d.InferInput<typeof DirLight>;
 
-/** One entry of a material palette, indexed by the field's material channel. */
+/**
+ * One entry of a material palette, indexed by the field's material channel.
+ *
+ * The last three fields are what make a surface see-through, and they live *here* rather
+ * than on an object for a reason: the renderer knows a scene as one distance field with a
+ * material channel, not as a list of things. Put transparency in the palette and every
+ * kind of object gets it at once - an authored solid, a simulated body, a fluid bake, and
+ * anything a third party writes against `Entity` - with no per-type render code.
+ */
 export const Material = d.struct({
   albedo: d.vec3f,
   roughness: d.f32,
   emissive: d.vec3f,
   metallic: d.f32,
+  /**
+   * How much of the surface is the surface, `0..1`. 1 is opaque and takes the fast path.
+   * Below 1 the shading of the surface is mixed over whatever is behind it.
+   */
+  opacity: d.f32,
+  /**
+   * Index of refraction. 1 bends nothing, water is 1.33, glass ~1.5. Only meaningful
+   * below `opacity` 1.
+   */
+  ior: d.f32,
+  /**
+   * Beer-Lambert absorption per world unit travelled through the body, tinted by
+   * `1 - albedo`. 0 is perfectly clear glass; a thick pool of water at 0.6 goes visibly
+   * blue at the bottom while its shallow edge stays clear, which is the whole reason
+   * absorption is a length integral rather than a constant tint.
+   */
+  absorption: d.f32,
 });
 export type MaterialValue = d.InferInput<typeof Material>;
+
+/**
+ * A material as a game writes one: everything but `albedo` has a default, so an opaque
+ * material stays four lines and transparency is opt-in per entry.
+ */
+export interface MaterialSpec {
+  albedo: readonly [number, number, number];
+  roughness?: number;
+  emissive?: readonly [number, number, number];
+  metallic?: number;
+  /** See {@link Material.opacity}. Defaults to 1 - opaque. */
+  opacity?: number;
+  /** See {@link Material.ior}. Defaults to 1.33, which only matters once `opacity < 1`. */
+  ior?: number;
+  /** See {@link Material.absorption}. Defaults to 0.5. */
+  absorption?: number;
+}
+
+/** Fills a {@link MaterialSpec}'s defaults. */
+export function normalizeMaterial(spec: MaterialSpec): MaterialValue {
+  return {
+    albedo: [spec.albedo[0], spec.albedo[1], spec.albedo[2]],
+    roughness: spec.roughness ?? 0.7,
+    emissive: [...(spec.emissive ?? [0, 0, 0])] as [number, number, number],
+    metallic: spec.metallic ?? 0,
+    opacity: spec.opacity ?? 1,
+    ior: spec.ior ?? 1.33,
+    absorption: spec.absorption ?? 0.5,
+  };
+}
+
+/** True when this material transmits anything at all. A JS test, run when a game boots. */
+export const isTransparent = (spec: MaterialSpec): boolean => (spec.opacity ?? 1) < 1;
 
 /** Upper bound on palette entries; the g-buffer stores the id in a `unorm8`. */
 export const MAX_MATERIALS = 256;
 export type MaterialPalette = TgpuReadonly<d.WgslArray<typeof Material>>;
 
-export function createPalette(root: TgpuRoot, entries: readonly MaterialValue[]): MaterialPalette {
+export function createPalette(root: TgpuRoot, entries: readonly MaterialSpec[]): MaterialPalette {
   if (entries.length > MAX_MATERIALS) {
     throw new Error(`createPalette: ${entries.length} materials exceeds ${MAX_MATERIALS}`);
   }
   const count = Math.max(1, entries.length);
-  return root.createReadonly(d.arrayOf(Material, count), [...entries]);
+  const filled = entries.map(normalizeMaterial);
+  // An empty palette still needs slot 0, or the array type has length 0 and nothing binds.
+  while (filled.length < count) {
+    filled.push(normalizeMaterial({ albedo: [0.5, 0.5, 0.5] }));
+  }
+  return root.createReadonly(d.arrayOf(Material, count), filled);
 }
 
 /**
@@ -54,6 +117,9 @@ export function makePaletteSampler(palette: MaterialPalette, count: number) {
       roughness: std.mix(a.roughness, b.roughness, f),
       emissive: std.mix(a.emissive, b.emissive, f),
       metallic: std.mix(a.metallic, b.metallic, f),
+      opacity: std.mix(a.opacity, b.opacity, f),
+      ior: std.mix(a.ior, b.ior, f),
+      absorption: std.mix(a.absorption, b.absorption, f),
     });
   };
 }
@@ -93,6 +159,9 @@ export function makeShading(field: TracedField, options: ShadingOptions = {}) {
   // a wide cone around a near-tangent direction clips the surface it started on and
   // reports occlusion that is not there.
   const aoAperture = options.aoAperture ?? 0.08;
+  // A single deterministic cone has to cover the hemisphere on its own, so it is wide
+  // where the stochastic one is narrow. 0.45 is a ~24 degree half-angle.
+  const fixedAperture = Math.max(aoAperture, 0.45);
   const aoMinMip = Math.min(options.aoMinMip ?? 0, field.maxMip);
   const biasVoxels = options.bias ?? 1;
   const shadowMinMip = Math.min(options.shadowMinMip ?? 0, field.maxMip);
@@ -165,10 +234,51 @@ export function makeShading(field: TracedField, options: ShadingOptions = {}) {
     return std.select(d.f32(1), d.f32(0), hit.hit === 1);
   };
 
-  return { coneAO, softShadow, aoTracer, shadowTracer };
+  /**
+   * The same shadow query with no jitter and a point-sized light.
+   *
+   * Exists because the transparency layer is composited *after* the temporal filter (see
+   * `render/composite.ts`), so it has nothing to average its noise into. A stochastic
+   * shadow there would be salt-and-pepper on every pane of glass; one deterministic ray
+   * is stable at the cost of a hard shadow edge, which on a surface you can see through
+   * is the trade nobody notices.
+   */
+  const hardShadow = (p: d.v3f, n: d.v3f, dir: d.v3f, tMax: number) => {
+    'use gpu';
+    const bias = field.voxelWorld(0) * biasVoxels;
+    const hit = shadowTracer.ray(p + n * bias, dir, d.f32(0), tMax);
+    return std.select(d.f32(1), d.f32(0), hit.hit === 1);
+  };
+
+  /**
+   * One cone straight up the normal. Deterministic, and for the same reason as
+   * {@link hardShadow}: it is the AO term for surfaces that never reach the temporal
+   * filter. The aperture is widened, because a single cone has to stand in for the whole
+   * hemisphere integral that {@link coneAO} converges to over many frames.
+   */
+  const axisAO = (p: d.v3f, n: d.v3f) => {
+    'use gpu';
+    const bias = field.voxelWorld(0) * biasVoxels;
+    const hit = aoTracer.cone(p + n * bias, n, d.f32(0), aoDistance, fixedAperture);
+    return std.select(d.f32(1), std.clamp(hit.t / aoDistance, 0, 1), hit.hit === 1);
+  };
+
+  return { coneAO, softShadow, hardShadow, axisAO, aoTracer, shadowTracer };
 }
 
 export type Shading = ReturnType<typeof makeShading>;
+
+/**
+ * Schlick's approximation of the Fresnel term: how much of the light bounces off a
+ * surface instead of going into it. `f0` is the reflectance head-on (0.04 for a
+ * dielectric); at a grazing angle everything reflects, which is why the far edge of a
+ * pool is a mirror and the near edge is not.
+ */
+export const fresnelSchlick = (cosTheta: number, f0: number) => {
+  'use gpu';
+  const c = std.clamp(1 - cosTheta, 0, 1);
+  return f0 + (1 - f0) * (c * c) * (c * c) * c;
+};
 
 /** Lambert + GGX-ish specular. Enough for clay; swap out per game. */
 export const shadeDirect = (

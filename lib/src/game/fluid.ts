@@ -18,6 +18,12 @@ export interface FluidSpawnOptions {
   /** XSPH velocity blend per substep, `0..1`. Claybook's clay-like water wants ~0.4. */
   viscosity?: number;
   gravity?: readonly [number, number, number];
+  /**
+   * Draw the liquid see-through. Defaults to whether its material has an `opacity` below
+   * 1, which is the whole configuration a game needs: declare water as water in the
+   * palette and it renders as water.
+   */
+  transparent?: boolean;
   label?: string;
 }
 
@@ -39,6 +45,11 @@ export interface FluidContact {
 export class Fluid extends GameObject {
   /** A fluid is not something to stand on, and must not collide with its own bake. */
   readonly collidable = false;
+  /**
+   * Decided at construction, not at build: which pass a fluid is drawn in is baked into
+   * the pipelines, and the flag has to be readable before `build` runs.
+   */
+  readonly transparent: boolean;
 
   private readonly options: FluidSpawnOptions;
   private sim: FluidSim | null = null;
@@ -46,6 +57,7 @@ export class Fluid extends GameObject {
   constructor(game: Game, options: FluidSpawnOptions = {}) {
     super(game);
     this.options = options;
+    this.transparent = options.transparent ?? game.materialOpacity(options.material) < 1;
   }
 
   /**

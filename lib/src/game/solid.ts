@@ -26,6 +26,13 @@ export interface SolidSpawnOptions {
    * loses the slack it needs to take big steps at coarse mips.
    */
   band?: number;
+  /**
+   * Draw the whole solid see-through. Defaults to false, and unlike a body or a fluid it
+   * is not inferred: a level is one field over many materials, so there is no single
+   * material to read an answer off. Set it for a solid that really is one substance - a
+   * pane, an ice sheet, a jar - and give that substance an `opacity` below 1.
+   */
+  transparent?: boolean;
   label?: string;
 }
 
@@ -40,6 +47,7 @@ export interface SolidSpawnOptions {
 export class Solid extends GameObject {
   readonly volume: SdfVolume;
   readonly field: TracedField;
+  readonly transparent: boolean;
 
   private readonly builder: SdfBuilder;
   private readonly editor: SdfEditor;
@@ -60,6 +68,7 @@ export class Solid extends GameObject {
     this.builder = new SdfBuilder(this.volume);
     this.editor = new SdfEditor(this.volume);
     this.resolveMaterial = (n) => game.material(n);
+    this.transparent = options.transparent ?? false;
     this.current = options.shape;
   }
 

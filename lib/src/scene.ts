@@ -14,18 +14,18 @@ import {
   DirLight,
   type DirLightValue,
   type MaterialPalette,
-  type MaterialValue,
+  type MaterialSpec,
 } from './trace/shade.ts';
 import type { TracerOptions } from './trace/march.ts';
 
 export interface SdfSceneOptions {
   canvas: HTMLCanvasElement;
-  materials: readonly MaterialValue[];
+  materials: readonly MaterialSpec[];
   light?: DirLightValue;
   volume?: SdfVolumeOptions;
   camera?: CameraOptions;
   tracer?: TracerOptions;
-  shading?: Omit<DeferredOptions, 'paletteCount' | 'presentFormat'>;
+  shading?: Omit<DeferredOptions, 'paletteCount' | 'presentFormat' | 'transparent'>;
   /** Upper bound on brushes in one full rebuild. */
   maxBrushes?: number;
   /** Device pixel ratio cap. 1 is a good default for a raymarcher. */

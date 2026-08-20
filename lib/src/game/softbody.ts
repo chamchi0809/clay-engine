@@ -55,6 +55,14 @@ export interface SoftBodySpawnOptions {
   gravity?: number;
   /** Tangential motion removed on contact, `0..1`. */
   friction?: number;
+  /**
+   * Draw the body see-through. Defaults to whether its material has an `opacity` below 1.
+   *
+   * The body rasterises rather than traces, and transparency does not care: it moves the
+   * one indirect draw into the transparency layer's pass, against the same depth buffer,
+   * and the composite reads the same two attachments either way.
+   */
+  transparent?: boolean;
   label?: string;
 }
 
@@ -96,6 +104,11 @@ export class SoftBody extends GameObject {
    * (GDC'18 slides 45-47) and only ray-traced the fluid.
    */
   readonly traced = false;
+  /**
+   * Decided at construction, because it selects which G-buffer pass this body's draw is
+   * recorded into and the game reads it before `build` runs.
+   */
+  readonly transparent: boolean;
 
   private readonly tracker: BodyTracker;
   private readonly box: number;
@@ -136,6 +149,7 @@ export class SoftBody extends GameObject {
     const spacing = options.spacing ?? bounds.radius / 8.5;
     this.bakeRes = options.bakeResolution ?? 32;
     this.materialId = game.material(options.material);
+    this.transparent = options.transparent ?? game.materialOpacity(options.material) < 1;
     // A cell of margin on every side, or surface nets clips the body flat where it
     // touches the boundary. Cost is O(res^3) in the extraction dispatch, so the cell
     // count is capped rather than letting a fine spacing over a wide reach explode.

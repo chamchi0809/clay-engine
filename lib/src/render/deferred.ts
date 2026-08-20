@@ -22,6 +22,12 @@ export interface DeferredOptions extends ShadingOptions {
   paletteCount: number;
   /** Swapchain format of the presented target. */
   presentFormat: GPUTextureFormat;
+  /**
+   * Also shade the transparency layer's `(shadow, ao)` into the lighting target's `zw`.
+   * Compiled in as a JS constant, so a scene with nothing see-through in it pays for
+   * neither the extra ray nor the extra cone.
+   */
+  transparent?: boolean;
   /** Weight of the new sample in the temporal filter. Lower = smoother, laggier. */
   taaAlpha?: number;
   /**
@@ -50,7 +56,8 @@ export interface DeferredOptions extends ShadingOptions {
   filterRadius?: number;
 }
 
-const defaultSky = (dir: d.v3f) => {
+/** The engine's stand-in environment: a two-tone gradient. Also what glass reflects. */
+export const defaultSky = (dir: d.v3f) => {
   'use gpu';
   const up = std.clamp(dir.y * 0.5 + 0.5, 0, 1);
   return std.mix(d.vec3f(0.35, 0.33, 0.4), d.vec3f(0.55, 0.72, 1.0), up);
@@ -94,6 +101,7 @@ export class DeferredResolve {
     const ambientVec = d.vec3f(ambient[0], ambient[1], ambient[2]);
     const bias = field.voxelWorld(0);
     const debug = options.debug ?? 'off';
+    const withTransparent = options.transparent ?? false;
     const filterRadius = Math.max(0, Math.round(options.filterRadius ?? 2));
     const taaClamp = Math.max(0, options.taaClamp ?? 2);
 
@@ -104,12 +112,39 @@ export class DeferredResolve {
       vertex: common.fullScreenTriangle,
       fragment: tgpu.fragmentFn({
         in: { pos: d.builtin.position, uv: d.vec2f },
-        // vec4f, not vec2f: a fragment output may have more components than its target
-        // has channels, and TypeGPU only models the vec4f case.
+        // vec4f: `xy` is the opaque layer's (shadow, ao), `zw` the transparency layer's.
         out: d.vec4f,
       })(({ pos, uv }) => {
         'use gpu';
         const c = camera.$;
+        const l = light.$;
+        const toLight = std.neg(l.dir);
+        const dir = std.normalize(ray(uv));
+        const seed = d.u32(pos.x) * 1973 + d.u32(pos.y) * 9277 + c.frame * 26699;
+
+        // The transparency layer, if the scene has one. Deterministic queries, because
+        // the composite that consumes these is downstream of the temporal filter and has
+        // nothing to average noise into.
+        let shadowT = d.f32(0);
+        let aoT = d.f32(0);
+        if (withTransparent) {
+          const ntT = std.textureSampleLevel(
+            lightingInLayout.$.normalTT,
+            lightingInLayout.$.samp,
+            uv,
+            d.f32(0),
+          );
+          if (ntT.w > 0) {
+            const pT = c.pos + dir * ntT.w;
+            // Face the eye: the primary ray can land on either side of a thin sheet, and
+            // an away-facing normal biases the ray start *into* the surface.
+            const nT0 = std.normalize(ntT.xyz);
+            const nT = std.select(std.neg(nT0), nT0, std.dot(nT0, dir) < 0);
+            shadowT = shading.hardShadow(pT, nT, toLight, c.far);
+            aoT = shading.axisAO(pT, nT);
+          }
+        }
+
         const nt = std.textureSampleLevel(
           lightingInLayout.$.normalT,
           lightingInLayout.$.samp,
@@ -117,20 +152,18 @@ export class DeferredResolve {
           d.f32(0),
         );
         if (nt.w < 0) {
-          return d.vec4f(1, 1, 0, 0);
+          return d.vec4f(1, 1, shadowT, aoT);
         }
-        const p = c.pos + std.normalize(ray(uv)) * nt.w;
+        const p = c.pos + dir * nt.w;
         const n = std.normalize(nt.xyz);
-        const l = light.$;
-        const seed = d.u32(pos.x) * 1973 + d.u32(pos.y) * 9277 + c.frame * 26699;
         return d.vec4f(
-          shading.softShadow(p, n, std.neg(l.dir), c.far, l.size, seed),
+          shading.softShadow(p, n, toLight, c.far, l.size, seed),
           shading.coneAO(p, n, seed + 7919),
-          0,
-          0,
+          shadowT,
+          aoT,
         );
       }),
-      targets: { format: 'rg16float' },
+      targets: { format: 'rgba16float' },
     });
 
     this.pipeline = root.createRenderPipeline({
@@ -307,7 +340,7 @@ export class DeferredResolve {
 }
 
 /** Narkowicz ACES approximation - one mad and a divide, no LUT. */
-const tonemap = (x: d.v3f) => {
+export const tonemap = (x: d.v3f) => {
   'use gpu';
   const a = x * (x * 2.51 + d.vec3f(0.03));
   const b = x * (x * 2.43 + d.vec3f(0.59)) + d.vec3f(0.14);

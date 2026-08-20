@@ -1,9 +1,16 @@
 import tgpu from 'typegpu';
 import type { TgpuRoot } from 'typegpu';
-import { GBuffer } from '../render/gbuffer.ts';
+import { GBuffer, type RenderLayer } from '../render/gbuffer.ts';
 import { SdfRaymarcher } from '../render/raymarch.ts';
 import { DeferredResolve, type DeferredOptions } from '../render/deferred.ts';
-import { createPalette, type MaterialPalette, type MaterialValue } from '../trace/shade.ts';
+import { TransparentComposite, type CompositeOptions } from '../render/composite.ts';
+import {
+  createPalette,
+  normalizeMaterial,
+  type MaterialPalette,
+  type MaterialSpec,
+  type MaterialValue,
+} from '../trace/shade.ts';
 import { analyticField, unionField, type TracedField } from '../trace/field.ts';
 import type { TracerOptions } from '../trace/march.ts';
 import { GameCamera, type CameraSpawnOptions } from './camera.ts';
@@ -19,8 +26,12 @@ export interface GameOptions {
   /**
    * The material palette, by name. Shapes refer to these names, so a level never
    * hardcodes a palette index.
+   *
+   * `albedo` is the only required field. An entry with `opacity` below 1 is see-through,
+   * and any object spawned with a single such material draws itself that way without
+   * being told - see {@link Entity.transparent}.
    */
-  materials: Record<string, MaterialValue>;
+  materials: Record<string, MaterialSpec>;
   /**
    * The play area. Sets the default extent of a solid's volume and of a fluid's bake,
    * both of which are fixed-size 3D textures and so cannot simply grow.
@@ -30,7 +41,12 @@ export interface GameOptions {
   pixelRatio?: number;
   tracer?: TracerOptions;
   /** Lighting and filter knobs. Everything here has a working default. */
-  shading?: Omit<DeferredOptions, 'paletteCount' | 'presentFormat'>;
+  shading?: Omit<DeferredOptions, 'paletteCount' | 'presentFormat' | 'transparent'>;
+  /**
+   * Transparency knobs. Only consulted once something in the scene is see-through; sky,
+   * ambient and exposure are taken from {@link shading} so the two passes agree.
+   */
+  transparency?: Omit<CompositeOptions, 'paletteCount' | 'presentFormat' | 'sky' | 'ambient' | 'exposure'>;
 }
 
 /**
@@ -59,12 +75,15 @@ export class Game {
   private readonly palette: MaterialPalette;
   private readonly paletteCount: number;
   private readonly materialIds: Map<string, number>;
+  private readonly materialValues: readonly MaterialValue[];
   private readonly options: GameOptions;
   private readonly pixelRatio: number;
 
   private readonly members: Entity[] = [];
   private raymarcher: SdfRaymarcher | null = null;
+  private transparentMarcher: SdfRaymarcher | null = null;
   private resolve: DeferredResolve | null = null;
+  private composite: TransparentComposite | null = null;
   private dirty = true;
   private running = false;
   private raf = 0;
@@ -95,6 +114,7 @@ export class Game {
     const names = Object.keys(options.materials);
     this.materialIds = new Map(names.map((n, i) => [n, i]));
     this.paletteCount = names.length;
+    this.materialValues = names.map((n) => normalizeMaterial(options.materials[n]!));
     this.palette = createPalette(root, names.map((n) => options.materials[n]!));
     this.gbuffer = new GBuffer(root);
   }
@@ -151,6 +171,15 @@ export class Game {
   }
 
   /**
+   * Opacity of a material, `0..1`. What an entity asks so it can default its own
+   * `transparent` flag from the material it was spawned with, instead of a game having to
+   * say "this is water" twice.
+   */
+  materialOpacity(name: string | number | undefined): number {
+    return this.materialValues[this.material(name)]?.opacity ?? 1;
+  }
+
+  /**
    * Everything solid enough to hit, as one field. `exclude` drops one entity, which is
    * how a simulated body avoids colliding with its own baked surface.
    */
@@ -170,9 +199,29 @@ export class Game {
     return this.merge(this.members.filter((e) => e !== exclude && e.collidable !== false));
   }
 
-  /** Everything the renderer traces this frame. */
+  /** Everything the renderer traces this frame, both layers. */
   get field(): TracedField {
-    return this.merge(this.members.filter((e) => e.traced !== false));
+    return this.merge(this.tracedMembers());
+  }
+
+  /**
+   * The traced field of one layer. The split is what makes transparency possible at all:
+   * the opaque layer is what the deferred resolve shades and what every shadow, AO and
+   * refraction lookup sees, and the transparent layer is traced separately *after* it, so
+   * a see-through surface can be composited over an image that already exists.
+   */
+  layerField(layer: RenderLayer): TracedField {
+    const want = layer === 'transparent';
+    return this.merge(this.tracedMembers().filter((e) => (e.transparent === true) === want));
+  }
+
+  /** True when anything at all is drawn into the transparency layer. */
+  private get hasTransparent(): boolean {
+    return this.members.some((e) => e.transparent === true);
+  }
+
+  private tracedMembers(): Entity[] {
+    return this.members.filter((e) => e.traced !== false);
   }
 
   private merge(list: readonly Entity[]): TracedField {
@@ -242,6 +291,7 @@ export class Game {
     cpass.end();
 
     this.raymarcher!.prepass(encoder);
+    this.transparentMarcher?.prepass(encoder);
 
     const gpass = encoder.beginRenderPass({
       label: 'game-gbuffer',
@@ -258,9 +308,36 @@ export class Game {
     });
     this.raymarcher!.draw(gpass);
     for (const e of this.members) {
-      e.drawGeometry?.(gpass);
+      if (e.transparent !== true) {
+        e.drawGeometry?.(gpass);
+      }
     }
     gpass.end();
+
+    // The transparency layer: the same two attachments one surface deeper, sharing the
+    // opaque layer's depth buffer. Loading that depth rather than clearing it is what
+    // culls every see-through surface hidden behind a wall, for free and before shading.
+    if (this.composite) {
+      const tpass = encoder.beginRenderPass({
+        label: 'game-gbuffer-transparent',
+        colorAttachments: [
+          { view: targets.albedoViewT, clearValue: [0, 0, 0, 0] },
+          { view: targets.normalViewT, clearValue: [0, 0, 0, -1] },
+        ],
+        depthStencilAttachment: {
+          view: targets.depthView,
+          depthLoadOp: 'load',
+          depthStoreOp: 'store',
+        },
+      });
+      this.transparentMarcher?.draw(tpass);
+      for (const e of this.members) {
+        if (e.transparent === true) {
+          e.drawGeometry?.(tpass);
+        }
+      }
+      tpass.end();
+    }
 
     // Stochastic shadow + AO into their own target, so the resolve can filter them
     // spatially instead of leaning on the temporal filter alone.
@@ -277,6 +354,22 @@ export class Game {
     });
     this.resolve!.draw(rpass, this.gbuffer.readGroup, targets.lightReadGroup);
     rpass.end();
+
+    // Transparency last, over the presented image, refracting the linear copy of it the
+    // resolve just wrote. `resolvedGroup` is this frame's history slot, not last frame's.
+    if (this.composite) {
+      const xpass = encoder.beginRenderPass({
+        label: 'game-transparency',
+        colorAttachments: [{ view: this.context, loadOp: 'load' }],
+      });
+      this.composite.draw(
+        xpass,
+        this.gbuffer.resolvedGroup,
+        targets.lightReadGroup,
+        targets.transparentReadGroup,
+      );
+      xpass.end();
+    }
 
     encoder.submit();
     this.gbuffer.flip();
@@ -316,21 +409,63 @@ export class Game {
       paletteCount: this.paletteCount,
       bounds: this.bounds,
       material: (n) => this.material(n),
+      materialOpacity: (n) => this.materialOpacity(n),
     };
     for (const e of this.members) {
       e.build?.(ctx);
     }
     // After `build`, because an entity may only have a field once it is built.
-    const field = this.field;
+    const transparent = this.hasTransparent;
+    // Only the opaque layer is shaded, shadowed and AO'd. That is also what a transparent
+    // surface refracts and reflects, so keeping it out of its own backdrop is deliberate
+    // rather than a shortcut: clear water that casts a solid shadow looks worse than clear
+    // water that casts none.
+    const field = transparent ? this.layerField('opaque') : this.field;
     this.raymarcher = new SdfRaymarcher(this.root, field, camera.camera.uniform, this.gbuffer, this.palette, {
       ...this.options.tracer,
       paletteCount: this.paletteCount,
     });
     this.resolve = new DeferredResolve(this.root, field, camera.camera.uniform, sun.uniform, this.palette, {
       ...this.options.shading,
+      transparent,
       paletteCount: this.paletteCount,
       presentFormat: this.presentFormat,
     });
+
+    // Both null unless something asked to be see-through, so a scene without any
+    // transparency runs exactly the passes it used to.
+    this.transparentMarcher = null;
+    this.composite = null;
+    if (transparent) {
+      const tracedTransparent = this.tracedMembers().some((e) => e.transparent === true);
+      if (tracedTransparent) {
+        this.transparentMarcher = new SdfRaymarcher(
+          this.root,
+          this.layerField('transparent'),
+          camera.camera.uniform,
+          this.gbuffer,
+          this.palette,
+          { ...this.options.tracer, paletteCount: this.paletteCount, layer: 'transparent' },
+        );
+      }
+      this.composite = new TransparentComposite(
+        this.root,
+        camera.camera.uniform,
+        sun.uniform,
+        this.palette,
+        {
+          ...this.options.transparency,
+          // Shared with the resolve, because a refracted pixel is compared against the
+          // pixels around it: a different sky, ambient or exposure here would draw a seam
+          // along every silhouette.
+          sky: this.options.shading?.sky,
+          ambient: this.options.shading?.ambient,
+          exposure: this.options.shading?.exposure,
+          paletteCount: this.paletteCount,
+          presentFormat: this.presentFormat,
+        },
+      );
+    }
   }
 
   private resize(): void {

@@ -38,6 +38,11 @@ export interface EntityContext {
   bounds: { origin: readonly [number, number, number]; size: number };
   /** Resolves a material name to its palette index. */
   material(name: string | number | undefined): number;
+  /**
+   * Opacity of a material, `0..1`. How an entity decides its own {@link Entity.transparent}
+   * without the game having to say so twice - see {@link Game.materialOpacity}.
+   */
+  materialOpacity(name: string | number | undefined): number;
 }
 
 /**
@@ -60,7 +65,8 @@ export interface Entity {
    * This entity as a signed distance field. Two independent roles, hence two flags:
    * {@link traced} decides whether the renderer draws it, {@link collidable} whether
    * anything else can hit it. A rasterised body is collidable but not traced; a fluid is
-   * traced but not collidable *by itself*.
+   * traced but not collidable *by itself*. {@link transparent} is a third, independent
+   * axis: which layer it is drawn into.
    */
   readonly field?: TracedField | null;
   /**
@@ -77,6 +83,26 @@ export interface Entity {
    */
   readonly collidable?: boolean;
   /**
+   * Whether this object is drawn see-through. Default false.
+   *
+   * A third flag rather than a property of the material, because it decides *which pass*
+   * the object is drawn in, and a pass is chosen when pipelines are built - the material
+   * only decides how the result looks. Set it and the object moves out of the opaque
+   * G-buffer into the transparency layer, whichever way it draws itself: a traced
+   * {@link field} goes to a second ray-marcher, {@link drawGeometry} is recorded into the
+   * second layer's pass. The material's `opacity`, `ior` and `absorption` then do the rest
+   * (see `Material` and `render/composite.ts`).
+   *
+   * It is not free, and the cost is a whole extra layer: one more coarse pre-pass, one
+   * more primary trace, two more G-buffer attachments and a composite pass. A scene with
+   * nothing transparent in it pays none of it, so leave this off unless the object really
+   * does need to be seen through.
+   *
+   * The engine draws one see-through surface per pixel. Two transparent objects in a line
+   * show the nearer one; they do not show through each other.
+   */
+  readonly transparent?: boolean;
+  /**
    * Create pipelines.
    *
    * Called before the first frame, and again after the entity set changes - because a
@@ -87,7 +113,13 @@ export interface Entity {
   build?(ctx: EntityContext): void;
   /** GPU compute work, recorded before the frame's render passes. */
   simulate?(pass: TgpuComputePass): void;
-  /** Rasterised geometry sharing the G-buffer. Depth-tests against the traced scene. */
+  /**
+   * Rasterised geometry sharing the G-buffer. Depth-tests against the traced scene.
+   *
+   * Recorded into whichever layer {@link transparent} selects, against the same depth
+   * buffer either way, so a rasterised body is see-through on exactly the same terms as a
+   * traced one.
+   */
   drawGeometry?(pass: TgpuRenderCommands): void;
   /** CPU-side work: readbacks, filters, timers. `dt` is the real frame time. */
   sync?(dt: number): void;

@@ -6,7 +6,7 @@ import {
   SdfScene,
   analyticField,
   unionField,
-  type MaterialValue,
+  type MaterialSpec,
 } from '@clay/engine/core';
 
 /**
@@ -24,7 +24,7 @@ const canvas = document.getElementById('view') as HTMLCanvasElement;
 const status = document.getElementById('status') as HTMLElement;
 const errorBox = document.getElementById('error') as HTMLElement;
 
-const materials: MaterialValue[] = [
+const materials: MaterialSpec[] = [
   { albedo: [0.85, 0.86, 0.9], roughness: 0.6, emissive: [0, 0, 0], metallic: 0.0 },
   { albedo: [0.9, 0.35, 0.28], roughness: 0.3, emissive: [0, 0, 0], metallic: 0.1 },
   { albedo: [0.25, 0.62, 0.85], roughness: 0.15, emissive: [0, 0, 0], metallic: 0.6 },

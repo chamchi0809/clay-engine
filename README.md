@@ -253,6 +253,16 @@ Three decisions inside the bake:
 - **A slot stores distance divided by its own box half-extent**, and the brush multiplies it
   back. That is what lets one bake serve any size and any scale, and it is why the bake
   never needs to know how big the shape will be in the world.
+- **Outside the box, the brush returns the distance to the box plus the margin `fit` left.**
+  There is no field out there to read, and the distance to the box alone is *zero on the
+  wall* - which puts a zero isosurface on the whole bake box and draws it, so every baked
+  mesh comes out wrapped in a flat-sided shell and every mesh used as a cutter presses that
+  shell into what it cuts. The sign never changes, which is why it survives a scan for
+  wrong-signed voxels and only shows up on screen. Adding the margin removes the crossing
+  and is still a lower bound, because the box is convex: a segment from outside to any
+  surface point is at least `dBox` long before it crosses the wall and at least the margin
+  after. So `fit` is not only about leaving room for the tracer inside the box - it is the
+  number that makes the outside sound.
 - **Brute force: one thread per voxel, every triangle.** Half a billion triangle tests for a
   5k-triangle mesh at 48³, which sounds ruinous and takes a few milliseconds, because every
   thread in a workgroup reads the same triangle on the same cycle. It is a load-time cost

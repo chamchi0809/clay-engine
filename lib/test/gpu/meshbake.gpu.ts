@@ -200,6 +200,55 @@ test('slots do not bleed into each other', async (t) => {
   atlas.destroy();
 });
 
+test('the field does not touch zero at the bake box wall', async (t) => {
+  if (!available) {
+    return t.skip('no WebGPU adapter');
+  }
+  // Outside the box the brush has no field to read and falls back to the distance to the
+  // *box*, which is zero on the wall. Without the bake's margin added back, every bake box
+  // in a scene carries a spurious zero isosurface and the tracer draws it: a mesh comes out
+  // wrapped in a flat-sided shell, and a mesh used as a cutter presses that shell into
+  // whatever it cuts. The sign never changes, so a scan for wrong-signed voxels sees nothing.
+  const { atlas, baker, evalAt } = rig();
+  const mesh = normalizeMesh(cube(), 0.5);
+  near(mesh.inset, 0.5, 'a 0.5 fit leaves half the box as margin', 1e-6);
+  const slot = atlas.allocate();
+  await baker.bake(slot, mesh);
+  const brush = { kind: 'volume' as const, slot, size: mesh.half, radius: mesh.inset };
+
+  // A line straight through the +x wall, which sits at `half` = 2. The cube's surface is at
+  // 1, so the true distance is `x - 1` the whole way. The two points either side of the wall
+  // are a texel clear of it (a texel is `2 * half / 48`), because the atlas's half-texel
+  // inset makes the last row of samples read from slightly inside - correct, and conservative,
+  // but not the closed form.
+  const line: [number, number, number][] = [
+    [1.6, 0.05, 0.03], [1.9, 0.05, 0.03],
+    [2.1, 0.05, 0.03], [2.6, 0.05, 0.03], [3.4, 0.05, 0.03],
+  ];
+  const got = await evalAt(brush, line);
+  for (let i = 0; i < line.length; i++) {
+    // The margin is `half - reach`, so on-axis `dBox + margin` is not merely a bound but the
+    // exact distance - the wall leaves no seam at all here.
+    near(got[i]!, line[i]![0] - 1, `across the +x wall at x=${line[i]![0]}`, EPS);
+  }
+
+  // And on the wall itself, where the two branches meet and neither is the closed form.
+  const [wall] = await evalAt(brush, [[2, 0.05, 0.03]]);
+  assert.ok(
+    wall! > 0.9 && wall! < 1 + EPS,
+    `on the wall the field is a whole unit of exterior, not zero, got ${wall}`,
+  );
+
+  // Off-axis the offset can only under-report, which is what makes it safe to march on.
+  const corner: [number, number, number] = [2.5, 2.5, 0.05];
+  const [dc] = await evalAt(brush, [corner]);
+  assert.ok(
+    dc! > 1 && dc! < sdBox(corner, 1) + EPS,
+    `at a box corner the field must be a positive under-estimate, got ${dc}`,
+  );
+  atlas.destroy();
+});
+
 test('the baker refuses a slot it does not have and a mesh it cannot hold', async (t) => {
   if (!available) {
     return t.skip('no WebGPU adapter');
@@ -264,6 +313,7 @@ test('a baked mesh bakes into a world volume as an ordinary brush', async (t) =>
   const baked: BakedMesh = {
     slot,
     half: norm.half,
+    inset: norm.inset,
     center: norm.center,
     triangleCount: norm.triangleCount,
   };

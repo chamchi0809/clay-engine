@@ -218,6 +218,7 @@ export class Game {
     return {
       slot,
       half: normalized.half,
+      inset: normalized.inset,
       center: normalized.center,
       triangleCount: normalized.triangleCount,
     };

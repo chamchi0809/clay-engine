@@ -128,7 +128,8 @@ export const sdf = {
    * a brush like any other from there: `.at()`, `.rotate()`, `.scale()`, `cut`, `.only()`,
    * and a soft body can morph into it.
    */
-  mesh: (baked: BakedMesh) => prim('volume', { size: baked.half, slot: baked.slot }),
+  mesh: (baked: BakedMesh) =>
+    prim('volume', { size: baked.half, radius: baked.inset, slot: baked.slot }),
 
   /** Smooth union of everything given. */
   union: (...shapes: readonly Shape[]): Shape =>

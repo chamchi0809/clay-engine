@@ -23,6 +23,17 @@ export interface NormalizedMesh {
    * was modelled at.
    */
   half: number;
+  /**
+   * The margin `fit` leaves, as a fraction of the half-extent: every surface point is at
+   * least this far inside every wall of the bake box.
+   *
+   * The brush needs it, not just the bake. Outside the box the brush has no field to read,
+   * and the distance to the *box* is zero at the wall - which puts a zero isosurface on the
+   * whole bake box and makes it render as a shell. `dBox + inset` is the fix, and it is
+   * sound precisely because the box is convex: a segment from a point outside to any surface
+   * point crosses the wall, so it is at least `dBox` long before the wall and `inset` after.
+   */
+  inset: number;
   /** Centre of the source mesh's bounding box, in its own units. */
   center: [number, number, number];
 }
@@ -38,6 +49,8 @@ export interface BakedMesh {
   readonly slot: number;
   /** The brush's `size`: the bake box's half-extent, in the source mesh's units. */
   readonly half: number;
+  /** The brush's `radius`: {@link NormalizedMesh.inset}, which the fold needs outside the box. */
+  readonly inset: number;
   /** Where the source mesh's bounding box was centred, for a game that has to line up with it. */
   readonly center: readonly [number, number, number];
   readonly triangleCount: number;
@@ -98,7 +111,9 @@ export function normalizeMesh(mesh: MeshData, fit = 0.9): NormalizedMesh {
       }
     }
   }
-  return { triangles, triangleCount, half, center };
+  // `fit` sets the widest axis, so no vertex exceeds `fit` on any axis and the margin is
+  // guaranteed on all six walls, not just the two the widest axis touches.
+  return { triangles, triangleCount, half, inset: 1 - fit, center };
 }
 
 /**

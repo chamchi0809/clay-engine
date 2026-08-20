@@ -339,11 +339,16 @@ export class BrushSet {
             // The bake box is a cube, so one half-extent describes it and the field stays
             // isotropic - which a non-uniform squash of a baked mesh would not.
             const h = std.max(size.x, 1e-5);
-            // Outside the box the distance to the box is a valid lower bound (the surface
-            // is strictly inside it) and avoids reading clamped border texels.
             const dBox = sdf.sdBox3d(p, d.vec3f(h));
             if (dBox > 0) {
-              return dBox;
+              // Outside the box there is no field to read, so the bound has to come from the
+              // box - but `dBox` alone is *zero at the wall*, which puts a zero isosurface on
+              // the whole bake box and renders it as a shell around the mesh. `radius` carries
+              // the margin the bake guarantees (see `NormalizedMesh.inset`), and adding it
+              // both removes the crossing and stays a lower bound, because the box is convex:
+              // a segment from here to any surface point is at least `dBox` long before it
+              // crosses the wall and at least `radius * h` long after.
+              return dBox + radius * h;
             }
             return sampleSlot(slot, p / h) * h;
           }

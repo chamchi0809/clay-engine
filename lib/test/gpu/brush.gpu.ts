@@ -2,7 +2,8 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import tgpu, { d, std } from 'typegpu';
 import type { TgpuRoot } from 'typegpu';
-import { Brush, BrushSet, defaultBrushSet, type BrushDesc } from '../../src/field/brush.ts';
+import { BrushSet, defaultBrushSet, type BrushDesc } from '../../src/field/brush.ts';
+import { evalWith, near } from './evalbrush.ts';
 import { adapterLimits, hasWebGPU } from './harness.mjs';
 
 /**
@@ -24,42 +25,11 @@ before(async () => {
   }
 });
 
-/** Evaluates one brush at each point, on the GPU, and reads the distances back. */
-async function evalAt(
+const evalAt = (
   brush: BrushDesc,
   points: readonly [number, number, number][],
   set: BrushSet = defaultBrushSet,
-): Promise<number[]> {
-  const r = root!;
-  const n = points.length;
-  const evalBrush = set.evalBrush;
-  const brushBuf = r.createUniform(Brush, set.make(brush));
-  const pointsBuf = r.createReadonly(d.arrayOf(d.vec3f, n));
-  pointsBuf.write(points.map(([x, y, z]) => d.vec3f(x, y, z)));
-  const out = r.createMutable(d.arrayOf(d.f32, n));
-
-  const pipeline = r.createComputePipeline({
-    compute: tgpu.computeFn({
-      workgroupSize: [64],
-      in: { gid: d.builtin.globalInvocationId },
-    })(({ gid }) => {
-      'use gpu';
-      if (gid.x >= d.u32(n)) {
-        return;
-      }
-      out.$[gid.x] = evalBrush(brushBuf.$, pointsBuf.$[gid.x]);
-    }),
-  });
-
-  pipeline.dispatchWorkgroups(Math.ceil(n / 64));
-  return [...(await out.buffer.read())];
-}
-
-const near = (actual: number, expected: number, msg: string, eps = 2e-3) =>
-  assert.ok(
-    Math.abs(actual - expected) < eps,
-    `${msg}: expected ~${expected}, got ${actual}`,
-  );
+): Promise<number[]> => evalWith(root!, set)(brush, points);
 
 test('sphere is exact inside, outside and on the surface', async (t) => {
   if (!available) {

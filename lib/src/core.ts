@@ -18,8 +18,10 @@
 export * from './gpu.ts';
 export * from './math/gpu.ts';
 
+export * from './field/atlas.ts';
 export * from './field/brush.ts';
 export * from './field/builder.ts';
+export * from './field/meshbake.ts';
 export * from './field/mips.ts';
 export * from './field/modify.ts';
 export * from './field/tilegrid.ts';
@@ -43,5 +45,6 @@ export * from './sim/meshdraw.ts';
 export * from './sim/fluid.ts';
 
 export * from './scene.ts';
+export * from './shape/mesh.ts';
 export * from './shape/sdf.ts';
 export * from './game/index.ts';

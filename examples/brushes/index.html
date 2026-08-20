@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clay Engine - custom brushes and baked meshes</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #0b0b10; overflow: hidden; }
+      body { font: 13px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e8ef; }
+      #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+      #status { position: fixed; inset: auto auto 12px 12px; color: #9aa0b4; }
+      #legend { position: fixed; inset: 12px 12px auto auto; text-align: right; color: #9aa0b4; }
+      #legend b { color: #e8e8ef; font-weight: 600; }
+      #error {
+        position: fixed; inset: 0; display: none; place-content: center; padding: 2rem;
+        background: #0b0b10; white-space: pre-wrap; font-family: ui-monospace, monospace; color: #ff9a9a;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="legend">
+      <b>hexPrism</b> - a custom primitive, six columns<br />
+      <b>the rock</b> - a baked mesh, 80 triangles from positions + indices<br />
+      <b>the spike</b> - a baked mesh, from OBJ text<br />
+      <b>the bite</b> - the spike again, this time as a cutter
+    </div>
+    <div id="status">booting…</div>
+    <pre id="error"></pre>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

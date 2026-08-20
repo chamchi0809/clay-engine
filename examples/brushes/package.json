@@ -1,0 +1,17 @@
+{
+  "name": "clay-example-brushes",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@clay/engine": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^8.2.1"
+  }
+}

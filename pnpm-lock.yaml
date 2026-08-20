@@ -41,6 +41,16 @@ importers:
         specifier: ^8.2.1
         version: 8.2.1
 
+  examples/brushes:
+    dependencies:
+      '@clay/engine':
+        specifier: workspace:*
+        version: link:../../lib
+    devDependencies:
+      vite:
+        specifier: ^8.2.1
+        version: 8.2.1
+
   lib:
     dependencies:
       '@typegpu/noise':

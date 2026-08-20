@@ -48,13 +48,14 @@ game.start(() => {
 });
 ```
 
-Three packages:
+Four packages:
 
 | Package | What it is |
 | --- | --- |
 | `lib` | `@clay/engine` - the engine. No game logic, no Claybook. |
 | `demo` | `clay-demo` - the Claybook clone: clay ball, morphing, digging, water, three pages. |
 | `examples/analytic` | The same render path over three hand-written `@typegpu/sdf` fields. No volume, no brushes, no simulation. |
+| `examples/brushes` | A primitive and two meshes the engine does not ship: `brushes`, `loadMesh`, `sdf.mesh`, and a baked mesh used as a cutter. |
 
 ## Claybook features, and where they live
 
@@ -66,6 +67,7 @@ Sebastian Aaltonen's GDC 2018 talk is the reference; slide numbers are from that
 | Sparse 8³ tile grid; only live tiles rebuild | 15-19 | `lib/src/field/tilegrid.ts` |
 | Mip chain with eikonal band re-expansion | 19-21 | `lib/src/field/mips.ts` |
 | Brush CSG authoring (sphere/box/capsule/torus, smooth union & subtract) | 15-17 | `lib/src/field/brush.ts`, `builder.ts` |
+| Baked brush volumes, for shapes with no closed form | 9 | `lib/src/field/atlas.ts`, `meshbake.ts` |
 | Incremental runtime edits - sculpting, digging, erosion | 18 | `lib/src/field/modify.ts` |
 | Hierarchical sphere tracing with mip hopping | 22-27 | `lib/src/trace/march.ts` |
 | 8×8 cone-trace pre-pass, deferred G-buffer | 28-32 | `lib/src/render/raymarch.ts`, `gbuffer.ts` |
@@ -181,6 +183,92 @@ near-field SSAO (Claybook layered UE4's SSAO on top of its cone AO for small-sca
 occlusion, and a rasterised body cannot contribute to cone AO at all), character
 animation, and Claybook's editor UI.
 
+## Primitives of your own, and meshes
+
+Eight analytic primitives cover a surprising amount, and then they don't. Two escape
+hatches, and the split between them is whether the shape has a closed form.
+
+**A custom primitive is a distance function you write.** It is declared next to the
+materials, because both are compiled into shader code when the game boots:
+
+```ts
+const game = await Game.create({
+  canvas,
+  materials: { clay: {...}, stone: {...} },
+  brushes: {
+    hexPrism: {
+      sdf: (p, size, radius) => { 'use gpu'; /* ... */ },
+      bound: (size, radius) => Math.hypot(size[0] / 0.8660254, size[1]) + radius,
+    },
+  },
+});
+
+level.shape = sdf.union(ground, sdf.custom('hexPrism', { size: [1, 2, 0] }).at([2, 1, 0]));
+```
+
+This is the one place the game API asks for a `'use gpu'` closure, which is honest: a new
+primitive *is* a shader edit. It buys full brush citizenship - a custom kind bakes into the
+world volume, carves with `cut`, respects `.only()`, and a soft body can morph into it.
+
+`bound` is the part that is easy to get wrong and hard to see. It is the conservative
+influence radius the sparse tile grid culls against; under-report it and tiles the brush
+actually reaches into are skipped, and the shape gets clipped along tile boundaries in a
+way that reads as a corrupted bake. It is declared once and used by both the GPU cull and
+CPU `shapeBounds`, so the two cannot drift. The distance function has one hard requirement:
+it must be 1-Lipschitz, or the tracer overshoots and rays tunnel through the surface.
+
+**A mesh has no closed form, so it gets baked.** This is what Claybook actually shipped for
+brushes it had no formula for (slide 9), and the only difference here is that the analytic
+kinds stay analytic:
+
+```ts
+const game = await Game.create({ canvas, materials, meshes: { resolution: 48, slots: 8 } });
+const rock = await game.loadMesh(rockObjText);        // or { positions, indices }
+
+level.shape = sdf.union(ground, sdf.mesh(rock).at([3, 0, 0]).material('stone'));
+level.cut(sdf.mesh(rock).scale(0.3).at(hit).only('clay'));
+ball.morph(sdf.mesh(rock).scale(0.8));
+```
+
+Every baked shape lives in slots of one 3D texture, stacked along Z, rather than a texture
+each. The brush fold is a single shader, so a texture per mesh would be a binding per mesh,
+and the bindings are fixed when the pipeline is compiled; a slot index in the brush struct
+is unbounded and cost nothing - it was the struct's second padding word. Slots are never
+freed, because a baked shape is an asset.
+
+That one texture is also why `resolution` is a property of the atlas and not of a mesh: one
+texture has one resolution, and per-mesh resolution would mean an atlas - and a binding -
+per distinct resolution. What `loadMesh` does take per mesh is `fit`, how much of its box
+the shape fills; the default 0.9 spends a tenth of the resolution on leaving a shell of
+exterior field for the tracer to approach the surface through.
+
+Three decisions inside the bake:
+
+- **The sign comes from a generalised winding number** (Jacobson et al. 2013), summed as
+  signed solid angle per triangle, not from ray parity. Parity needs a closed surface and
+  gives a plainly wrong answer - a whole wrong scanline - for the open, self-intersecting,
+  duplicated-face geometry real art assets are made of. The winding number degrades
+  gracefully instead, and it is taken absolute, so a mesh wound the other way round comes
+  out solid rather than invisible.
+- **A slot stores distance divided by its own box half-extent**, and the brush multiplies it
+  back. That is what lets one bake serve any size and any scale, and it is why the bake
+  never needs to know how big the shape will be in the world.
+- **Brute force: one thread per voxel, every triangle.** Half a billion triangle tests for a
+  5k-triangle mesh at 48³, which sounds ruinous and takes a few milliseconds, because every
+  thread in a workgroup reads the same triangle on the same cycle. It is a load-time cost
+  paid once per asset. The upgrade path, if it ever shows up in a load screen, is a narrow
+  band plus a BVH - which would trade the winding number's robustness for a sweep that
+  assumes a closed surface.
+
+`meshes` is off unless asked for. The atlas is a fixed-size 3D texture bound into every
+pipeline that bakes or edits a field - a few megabytes and one bind group - and a game with
+no baked meshes should not pay for either. Like `brushes`, it cannot be turned on later.
+
+Both live in `examples/brushes` (`pnpm dev:brushes`): a rounded hexagonal prism as a custom
+kind, a rock subdivided out of an icosahedron loaded from `{ positions, indices }`, a
+tetrahedron loaded from OBJ text, and that same tetrahedron pressed into a clay slab as the
+cutter of a `cut`. It is deliberately not in `demo`, which stays free of GPU vocabulary.
+
 ## The game API
 
 ```ts
@@ -236,7 +324,7 @@ Inside `lib/src`, dependencies run one way only:
 
 ```
 math/    GPU helpers (quaternions, smooth min/max, hashes)
-field/   authoring and storage of a mip-mapped SDF volume (brushes, tiles, mip refinement)
+field/   authoring and storage of a mip-mapped SDF volume (brushes, tiles, mips, mesh bakes)
 trace/   TracedField + tracing and shading over *any* field
 render/  camera, G-buffer, the passes that turn a field into pixels
 sim/     particle physics that reads fields and writes back into them
@@ -327,6 +415,10 @@ dependency alone.
 `examples/analytic` is the one deliberate exception. It depends on `@typegpu/sdf` because
 it is playing the part of a third party bringing its own SDF primitives.
 
+`examples/brushes` keeps the rule and shows what it buys: it writes a distance function of
+its own, and it gets `d` and `std` from `@clay/engine` rather than from `typegpu`, which is
+exactly why its closure resolves against the same schema objects the engine's fold does.
+
 ## Tests
 
 `pnpm test` runs 42 unit tests. They are JS mirrors of the parts where being wrong is
@@ -337,4 +429,18 @@ behind `sdf.cut` (and the nested-subtraction case it refuses rather than silentl
 mis-builds), the material-mask weight behind `.only()`, the per-second to per-substep
 plasticity conversion, the quaternion composition behind `shape.turn()`, and `orbit`.
 
-`pnpm check` runs those plus `tsc` over all three packages.
+`pnpm test:gpu` runs 16 more against a real driver. Some things cannot be mirrored in JS,
+because being wrong there is not just silent but *consistent*: a brush with a swapped axis
+still produces a surface, and the bake, the tracer and the collider all agree on the wrong
+one. So the brush fold and the mesh baker are dispatched for real and the buffers read back
+- primitives against distances worked out by hand, a baked cube against the box closed form,
+the winding-number sign against a reverse-wound and a holed mesh, slot isolation against
+bleed at a slot's Z wall, and one test that runs a baked mesh all the way through
+`SdfBuilder` into a world volume.
+
+Node has no WebGPU, so the harness brings Dawn (`webgpu` on npm) and bundles the tests with
+Rolldown and the same TypeGPU plugin a game uses - a `'use gpu'` closure is not runnable
+JavaScript, so `node --test` cannot simply import the source. Every test skips rather than
+fails where there is no adapter.
+
+`pnpm check` runs the unit tests plus `tsc` over all four packages.

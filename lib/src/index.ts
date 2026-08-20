@@ -24,8 +24,15 @@
 export * from './shape/sdf.ts';
 export * from './game/index.ts';
 export type { MaterialValue, DirLightValue } from './trace/shade.ts';
-/** For `Game.create({ brushes })`. The one place the game API asks for GPU code. */
+/**
+ * For `Game.create({ brushes })`. The one place the game API asks for GPU code - so the
+ * slice of TypeGPU needed to write a distance function comes with it, from the same
+ * instance the engine itself was built by. See `./gpu.ts` for why that has to be the case.
+ */
 export type { CustomBrush } from './field/brush.ts';
+export { d, std } from './gpu.ts';
+/** For `game.loadMesh`. `parseObj` is exported so a game can inspect what it loaded. */
+export { parseObj, type BakedMesh, type MeshData } from './shape/mesh.ts';
 export type { TracedField } from './trace/field.ts';
 export type { ShadingOptions } from './trace/shade.ts';
 export type { TracerOptions } from './trace/march.ts';

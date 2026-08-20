@@ -1,4 +1,5 @@
 import { defaultBrushSet, type BrushDesc, type BrushOpName, type BrushSet } from '../field/brush.ts';
+import type { BakedMesh } from './mesh.ts';
 
 /**
  * One primitive in a shape, plus the CSG operation that folds it into everything
@@ -119,6 +120,15 @@ export const sdf = {
    * the set does not know throws with the list of names it does.
    */
   custom: (name: string, params: CustomParams = {}) => prim(name, params),
+
+  /**
+   * A mesh baked by `game.loadMesh`, as an ordinary primitive.
+   *
+   * It comes out at the size it was modelled at, centred on its own bounding box, and it is
+   * a brush like any other from there: `.at()`, `.rotate()`, `.scale()`, `cut`, `.only()`,
+   * and a soft body can morph into it.
+   */
+  mesh: (baked: BakedMesh) => prim('volume', { size: baked.half, slot: baked.slot }),
 
   /** Smooth union of everything given. */
   union: (...shapes: readonly Shape[]): Shape =>

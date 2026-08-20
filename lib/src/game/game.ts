@@ -13,6 +13,9 @@ import {
 } from '../trace/shade.ts';
 import { analyticField, unionField, type TracedField } from '../trace/field.ts';
 import { BrushSet, defaultBrushSet, type CustomBrush } from '../field/brush.ts';
+import { BrushAtlas, type BrushAtlasOptions } from '../field/atlas.ts';
+import { MeshBaker, type MeshBakerOptions } from '../field/meshbake.ts';
+import { normalizeMesh, parseObj, type BakedMesh, type MeshData } from '../shape/mesh.ts';
 import type { TracerOptions } from '../trace/march.ts';
 import { GameCamera, type CameraSpawnOptions } from './camera.ts';
 import { Fluid, type FluidSpawnOptions } from './fluid.ts';
@@ -43,6 +46,16 @@ export interface GameOptions {
    */
   brushes?: Record<string, CustomBrush>;
   /**
+   * Enables {@link Game.loadMesh}. Present-means-on: `meshes: {}` is enough, and the
+   * defaults hold sixteen shapes at 48 voxels each.
+   *
+   * Off by default because the atlas is a fixed-size 3D texture bound into every pipeline
+   * that bakes or edits a field - a few megabytes and one bind group that a game with no
+   * baked meshes should not pay for. Like {@link brushes}, it cannot be turned on later:
+   * sampling it is compiled into the brush fold.
+   */
+  meshes?: BrushAtlasOptions & MeshBakerOptions;
+  /**
    * The play area. Sets the default extent of a solid's volume and of a fluid's bake,
    * both of which are fixed-size 3D textures and so cannot simply grow.
    */
@@ -57,6 +70,19 @@ export interface GameOptions {
    * ambient and exposure are taken from {@link shading} so the two passes agree.
    */
   transparency?: Omit<CompositeOptions, 'paletteCount' | 'presentFormat' | 'sky' | 'ambient' | 'exposure'>;
+}
+
+export interface LoadMeshOptions {
+  /**
+   * How much of the bake box the shape fills, on its widest axis. Under 1 by necessity - the
+   * field just inside the box wall has to be positive or there is no exterior for a ray to
+   * approach the surface through - and the default 0.9 spends 10% of the resolution on that.
+   *
+   * Lower it for a shape that other brushes have to blend smoothly into from far away, since
+   * only the field inside the box is real; outside it, the brush reports the distance to the
+   * box instead.
+   */
+  fit?: number;
 }
 
 /**
@@ -81,6 +107,8 @@ export class Game {
    * {@link GameOptions.brushes} declared. Fixed for the game's lifetime.
    */
   readonly brushSet: BrushSet;
+  /** The baked-mesh atlas, or null unless {@link GameOptions.meshes} asked for one. */
+  readonly meshAtlas: BrushAtlas | null;
   /** Seconds since {@link start}. */
   time = 0;
 
@@ -94,6 +122,7 @@ export class Game {
   private readonly options: GameOptions;
   private readonly pixelRatio: number;
 
+  private readonly meshBaker: MeshBaker | null;
   private readonly members: Entity[] = [];
   private raymarcher: SdfRaymarcher | null = null;
   private transparentMarcher: SdfRaymarcher | null = null;
@@ -126,10 +155,18 @@ export class Game {
     this.presentFormat = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device: root.device, format: this.presentFormat, alphaMode: 'opaque' });
 
+    // Before the brush set, because the set compiles the atlas sample into its fold.
+    this.meshAtlas = options.meshes ? new BrushAtlas(root, options.meshes) : null;
+    this.meshBaker = this.meshAtlas
+      ? new MeshBaker(root, this.meshAtlas, options.meshes ?? {})
+      : null;
+
     const custom = options.brushes ?? {};
     // Reuse the shared set when there is nothing to add, so a game that declares no
     // primitives of its own resolves to the exact same WGSL every other one does.
-    this.brushSet = Object.keys(custom).length > 0 ? new BrushSet({ custom }) : defaultBrushSet;
+    this.brushSet = Object.keys(custom).length > 0 || this.meshAtlas
+      ? new BrushSet({ custom, atlas: this.meshAtlas })
+      : defaultBrushSet;
 
     const names = Object.keys(options.materials);
     this.materialIds = new Map(names.map((n, i) => [n, i]));
@@ -147,6 +184,44 @@ export class Game {
     camera: (o: CameraSpawnOptions = {}): GameCamera => new GameCamera(this, o),
     sun: (o: SunSpawnOptions = {}): Sun => new Sun(this, o),
   };
+
+  /**
+   * Bakes a triangle mesh into a distance field and hands back a brush.
+   *
+   * `source` is either positions plus indices - straight off a glTF loader or a three.js
+   * `BufferGeometry` - or the text of an OBJ file. The mesh does not have to be watertight,
+   * consistently wound, or free of self-intersections: the sign comes from a generalised
+   * winding number, which is what makes an art asset usable rather than only a CAD solid.
+   *
+   * The result is an ordinary primitive from there:
+   *
+   * ```ts
+   * const rock = await game.loadMesh(rockObj);
+   * level.shape = sdf.union(ground, sdf.mesh(rock).at([3, 0, 0]).material('stone'));
+   * level.cut(sdf.mesh(rock).scale(0.3).at(hit).only('clay'));
+   * ```
+   *
+   * Awaited, because the bake has to have landed before a field is built out of it - a brush
+   * pointing at a slot nobody has written samples whatever the texture was cleared to.
+   */
+  async loadMesh(source: MeshData | string, options: LoadMeshOptions = {}): Promise<BakedMesh> {
+    if (!this.meshAtlas || !this.meshBaker) {
+      throw new Error(
+        'Game: baked meshes are off. Pass `meshes: {}` to `Game.create`. It cannot be turned '
+          + 'on now, because sampling the atlas is compiled into every field pipeline.',
+      );
+    }
+    const data = typeof source === 'string' ? parseObj(source) : source;
+    const normalized = normalizeMesh(data, options.fit);
+    const slot = this.meshAtlas.allocate();
+    await this.meshBaker.bake(slot, normalized);
+    return {
+      slot,
+      half: normalized.half,
+      center: normalized.center,
+      triangleCount: normalized.triangleCount,
+    };
+  }
 
   /** Everything spawned, in spawn order. */
   get entities(): readonly Entity[] {
@@ -402,6 +477,7 @@ export class Game {
     }
     this.members.length = 0;
     this.gbuffer.destroy();
+    this.meshAtlas?.destroy();
   }
 
   /**

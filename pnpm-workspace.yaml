@@ -2,3 +2,7 @@ packages:
   - lib
   - demo
   - examples/*
+
+# the headless Dawn binding ships a postinstall that fetches its prebuilt native addon
+onlyBuiltDependencies:
+  - webgpu

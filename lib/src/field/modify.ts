@@ -1,6 +1,6 @@
 import tgpu, { d, std } from 'typegpu';
 import type { TgpuComputePass, TgpuComputePipeline, TgpuMutable, TgpuReadonly, TgpuUniform } from 'typegpu';
-import { Brush, applyBrush, makeBrush, type BrushDesc, type BrushValue } from './brush.ts';
+import { Brush, BrushSet, defaultBrushSet, type BrushDesc, type BrushValue } from './brush.ts';
 import { MipRefiner } from './mips.ts';
 import { TileGrid, unflattenAt } from './tilegrid.ts';
 import { SdfVolume, TILE, volumeLevelLayout, volumeWriteLayout } from './volume.ts';
@@ -21,6 +21,12 @@ export interface SdfEditorOptions {
    * overflow; lower it to trade edit reach for the staging buffer's 2 KB per tile.
    */
   maxTiles?: number;
+  /**
+   * Primitives the edits may use. Compiled into the apply pipeline, so it has to be the
+   * same set the volume was built with - otherwise a brush kind that bakes into the world
+   * would silently read as empty when it is carved with. Defaults to the builtins.
+   */
+  brushSet?: BrushSet;
 }
 
 /**
@@ -43,6 +49,7 @@ export class SdfEditor {
   readonly refiner: MipRefiner;
   readonly maxEdits: number;
   readonly maxTiles: number;
+  readonly brushSet: BrushSet;
   readonly edits: TgpuReadonly<d.WgslArray<typeof Brush>>;
   readonly params: TgpuUniform<typeof EditParams>;
   /** Per-voxel `pack2x16float(distance, material)` staging area, indexed by tile slot. */
@@ -58,6 +65,8 @@ export class SdfEditor {
     const root = volume.root;
     this.volume = volume;
     this.maxEdits = options.maxEdits ?? 64;
+    this.brushSet = options.brushSet ?? defaultBrushSet;
+    const applyBrush = this.brushSet.applyBrush;
     const tileRes0 = volume.tileResPerMip[0];
     this.maxTiles = options.maxTiles ?? tileRes0 * tileRes0 * tileRes0;
     this.grid = new TileGrid(volume, options.tileCapacity ?? 8);
@@ -186,7 +195,7 @@ export class SdfEditor {
   /** Queues one edit for the next {@link flush}. */
   push(edit: BrushDesc | BrushValue): void {
     const brush = 'kind' in edit && typeof edit.kind === 'string'
-      ? makeBrush(edit as BrushDesc)
+      ? this.brushSet.make(edit as BrushDesc)
       : (edit as BrushValue);
     if (this.pending.length >= this.maxEdits) {
       // ponytail: dropping is better than growing the buffer mid-frame. Edits come
@@ -213,7 +222,12 @@ export class SdfEditor {
     this.grid.reset(pass);
     this.binPipeline.with(pass).dispatchWorkgroups(this.binGroups);
     this.grid.compact(pass, 0);
-    this.grid.dispatchTiles(pass, this.applyPipeline.with(this.volume.levelGroups[0]), 0);
+    let apply = this.applyPipeline.with(this.volume.levelGroups[0]);
+    // Empty unless the set has a mesh atlas, in which case the fold samples it.
+    for (const g of this.brushSet.groups) {
+      apply = apply.with(g);
+    }
+    this.grid.dispatchTiles(pass, apply, 0);
     this.grid.dispatchTiles(pass, this.copyPipeline.with(this.volume.writeGroups[0]), 0);
     for (let m = 1; m < this.volume.mipLevels; m++) {
       this.grid.dilate(pass, m);

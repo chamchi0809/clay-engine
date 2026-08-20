@@ -12,6 +12,7 @@ import {
   type MaterialValue,
 } from '../trace/shade.ts';
 import { analyticField, unionField, type TracedField } from '../trace/field.ts';
+import { BrushSet, defaultBrushSet, type CustomBrush } from '../field/brush.ts';
 import type { TracerOptions } from '../trace/march.ts';
 import { GameCamera, type CameraSpawnOptions } from './camera.ts';
 import { Fluid, type FluidSpawnOptions } from './fluid.ts';
@@ -32,6 +33,15 @@ export interface GameOptions {
    * being told - see {@link Entity.transparent}.
    */
   materials: Record<string, MaterialSpec>;
+  /**
+   * Primitives of your own, by the name `sdf.custom(name)` refers to them by. Each is a
+   * distance function plus a conservative bound - see {@link CustomBrush}.
+   *
+   * Declared here, alongside the materials, and for the same reason: both are compiled
+   * into shader code when the game boots. A primitive added later could not be baked into
+   * a field whose pipeline already exists, so this is the one and only place to add one.
+   */
+  brushes?: Record<string, CustomBrush>;
   /**
    * The play area. Sets the default extent of a solid's volume and of a fluid's bake,
    * both of which are fixed-size 3D textures and so cannot simply grow.
@@ -66,6 +76,11 @@ export class Game {
   readonly root: TgpuRoot;
   readonly canvas: HTMLCanvasElement;
   readonly bounds: { origin: readonly [number, number, number]; size: number };
+  /**
+   * The primitives every field in this game is built out of: the builtins plus whatever
+   * {@link GameOptions.brushes} declared. Fixed for the game's lifetime.
+   */
+  readonly brushSet: BrushSet;
   /** Seconds since {@link start}. */
   time = 0;
 
@@ -110,6 +125,11 @@ export class Game {
     this.context = context;
     this.presentFormat = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device: root.device, format: this.presentFormat, alphaMode: 'opaque' });
+
+    const custom = options.brushes ?? {};
+    // Reuse the shared set when there is nothing to add, so a game that declares no
+    // primitives of its own resolves to the exact same WGSL every other one does.
+    this.brushSet = Object.keys(custom).length > 0 ? new BrushSet({ custom }) : defaultBrushSet;
 
     const names = Object.keys(options.materials);
     this.materialIds = new Map(names.map((n, i) => [n, i]));

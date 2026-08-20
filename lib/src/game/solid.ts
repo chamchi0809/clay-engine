@@ -1,7 +1,6 @@
 import { SdfBuilder } from '../field/builder.ts';
 import { SdfEditor } from '../field/modify.ts';
 import { SdfVolume } from '../field/volume.ts';
-import { compileBrushes } from '../field/brush.ts';
 import { compileShape, type Shape } from '../shape/sdf.ts';
 import { volumeField, type TracedField } from '../trace/field.ts';
 import { GameObject } from './entity.ts';
@@ -65,8 +64,9 @@ export class Solid extends GameObject {
       label: options.label ?? 'solid',
     });
     this.field = volumeField(this.volume);
-    this.builder = new SdfBuilder(this.volume);
-    this.editor = new SdfEditor(this.volume);
+    const brushSet = game.brushSet;
+    this.builder = new SdfBuilder(this.volume, { brushSet });
+    this.editor = new SdfEditor(this.volume, { brushSet });
     this.resolveMaterial = (n) => game.material(n);
     this.transparent = options.transparent ?? false;
     this.current = options.shape;
@@ -102,7 +102,9 @@ export class Solid extends GameObject {
 
   simulate(pass: TgpuComputePass): void {
     if (this.rebuildQueued) {
-      this.builder.setBrushes(compileBrushes(compileShape(this.current, this.resolveMaterial)));
+      this.builder.setBrushes(
+        this.builder.brushSet.compile(compileShape(this.current, this.resolveMaterial)),
+      );
       this.builder.rebuild(pass);
       this.rebuildQueued = false;
     }

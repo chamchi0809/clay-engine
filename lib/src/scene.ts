@@ -1,6 +1,6 @@
 import tgpu from 'typegpu';
 import type { TgpuCommandEncoder, TgpuRenderPass, TgpuRoot, TgpuUniform } from 'typegpu';
-import { compileBrushes, type BrushDesc, type BrushValue } from './field/brush.ts';
+import { defaultBrushSet, type BrushDesc, type BrushSet, type BrushValue } from './field/brush.ts';
 import { SdfBuilder } from './field/builder.ts';
 import { SdfEditor } from './field/modify.ts';
 import { SdfVolume, type SdfVolumeOptions } from './field/volume.ts';
@@ -28,6 +28,11 @@ export interface SdfSceneOptions {
   shading?: Omit<DeferredOptions, 'paletteCount' | 'presentFormat' | 'transparent'>;
   /** Upper bound on brushes in one full rebuild. */
   maxBrushes?: number;
+  /**
+   * The primitives brushes may use. Compiled into the build and edit pipelines, so it is
+   * fixed for the scene's lifetime. Defaults to the builtins.
+   */
+  brushSet?: BrushSet;
   /** Device pixel ratio cap. 1 is a good default for a raymarcher. */
   maxPixelRatio?: number;
   /**
@@ -73,6 +78,7 @@ export class SdfScene {
   readonly volume: SdfVolume;
   readonly builder: SdfBuilder;
   readonly editor: SdfEditor;
+  readonly brushSet: BrushSet;
   /** The brush-built volume on its own, before {@link SdfSceneOptions.compose}. */
   readonly worldField: TracedField;
   /** What the renderer actually traces. */
@@ -115,8 +121,10 @@ export class SdfScene {
     });
 
     this.volume = new SdfVolume(root, options.volume);
-    this.builder = new SdfBuilder(this.volume, { maxBrushes: options.maxBrushes });
-    this.editor = new SdfEditor(this.volume);
+    const brushSet = options.brushSet ?? defaultBrushSet;
+    this.brushSet = brushSet;
+    this.builder = new SdfBuilder(this.volume, { maxBrushes: options.maxBrushes, brushSet });
+    this.editor = new SdfEditor(this.volume, { brushSet });
     this.worldField = volumeField(this.volume);
     this.gbuffer = new GBuffer(root);
     this.camera = new Camera(root, options.camera);
@@ -161,7 +169,7 @@ export class SdfScene {
   /** Replaces the whole brush list and schedules a full rebuild on the next frame. */
   setBrushes(list: readonly BrushDesc[] | readonly BrushValue[]): void {
     const compiled = (list as readonly BrushDesc[]).every((b) => typeof (b as BrushDesc).kind === 'string')
-      ? compileBrushes(list as readonly BrushDesc[])
+      ? this.brushSet.compile(list as readonly BrushDesc[])
       : (list as readonly BrushValue[]);
     this.builder.setBrushes(compiled);
     this.rebuildQueued = true;

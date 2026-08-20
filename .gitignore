@@ -10,6 +10,9 @@ dist/
 .vite/
 *.local
 
+# Bundled GPU tests
+lib/test/gpu/.out/
+
 # Logs
 *.log
 npm-debug.log*

@@ -1,6 +1,6 @@
 import tgpu, { d, std } from 'typegpu';
 import type { TgpuComputePass, TgpuComputePipeline, TgpuReadonly, TgpuUniform } from 'typegpu';
-import { Brush, applyBrush, type BrushValue } from './brush.ts';
+import { Brush, BrushSet, defaultBrushSet, type BrushValue } from './brush.ts';
 import { SdfVolume, TILE, volumeWriteLayout } from './volume.ts';
 
 /** Brushes considered per 8^3 tile. */
@@ -13,6 +13,13 @@ export const BuildParams = d.struct({
 export interface SdfBuilderOptions {
   /** Capacity of the brush buffer. */
   maxBrushes?: number;
+  /**
+   * The primitives this builder can fold. Defaults to the eight analytic ones.
+   *
+   * The set is baked into every generation pipeline below, so it cannot change afterwards -
+   * which is why a game declares its custom brushes at `Game.create` and not later.
+   */
+  brushSet?: BrushSet;
 }
 
 /**
@@ -39,6 +46,7 @@ export class SdfBuilder {
   readonly maxBrushes: number;
   readonly brushes: TgpuReadonly<d.WgslArray<typeof Brush>>;
   readonly params: TgpuUniform<typeof BuildParams>;
+  readonly brushSet: BrushSet;
 
   private readonly genPipelines: TgpuComputePipeline[] = [];
   private brushCount = 0;
@@ -47,6 +55,8 @@ export class SdfBuilder {
     const root = volume.root;
     this.volume = volume;
     this.maxBrushes = options.maxBrushes ?? 256;
+    this.brushSet = options.brushSet ?? defaultBrushSet;
+    const applyBrush = this.brushSet.applyBrush;
 
     const brushes = root
       .createReadonly(d.arrayOf(Brush, this.maxBrushes))
@@ -152,10 +162,12 @@ export class SdfBuilder {
   rebuild(pass: TgpuComputePass): void {
     for (let m = 0; m < this.volume.mipLevels; m++) {
       const tiles = this.volume.tileResPerMip[m];
-      this.genPipelines[m]
-        .with(this.volume.writeGroups[m])
-        .with(pass)
-        .dispatchWorkgroups(tiles, tiles, tiles);
+      let dispatch = this.genPipelines[m].with(this.volume.writeGroups[m]);
+      // Empty unless the set has a mesh atlas, in which case the fold samples it.
+      for (const g of this.brushSet.groups) {
+        dispatch = dispatch.with(g);
+      }
+      dispatch.with(pass).dispatchWorkgroups(tiles, tiles, tiles);
     }
   }
 }

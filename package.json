@@ -8,8 +8,9 @@
     "dev:analytic": "pnpm --filter clay-example-analytic dev",
     "build": "pnpm --filter clay-demo build && pnpm --filter clay-example-analytic build",
     "typecheck": "tsc -p lib && tsc -p demo && tsc -p examples/analytic",
-    "test": "node --test \"lib/test/**/*.test.mjs\"",
-    "check": "pnpm typecheck && pnpm test"
+    "test": "node --test \"lib/test/*.test.mjs\"",
+    "test:gpu": "node lib/test/gpu/run.mjs",
+    "check": "pnpm typecheck && pnpm test && pnpm test:gpu"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.70",

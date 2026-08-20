@@ -59,9 +59,15 @@ importers:
         specifier: ^3.4.0
         version: 3.4.2
     devDependencies:
+      rolldown:
+        specifier: ^1.2.5
+        version: 1.2.5
       vite:
         specifier: ^8.2.1
         version: 8.2.1
+      webgpu:
+        specifier: ^0.4.0
+        version: 0.4.0
 
 packages:
 
@@ -500,6 +506,9 @@ packages:
       yaml:
         optional: true
 
+  webgpu@0.4.0:
+    resolution: {integrity: sha512-F5pimn3Aoi0zWjuRdiVs5TnrUwSzD2lESBohsIUsqyitWkGRQlXU2fhV6ycXlQTa1bvAf3sjqiUpBEpmSQ5ptA==}
+
   webpack-virtual-modules@0.6.2:
     resolution: {integrity: sha512-66/V2i5hQanC51vBQKPH4aI8NMAcBW59FVBs+rC7eGHupMyfn34q7rZIE+ETlJ+XTevqfUhVVBgSUNSW2flEUQ==}
 
@@ -838,6 +847,13 @@ snapshots:
       tinyglobby: 0.2.17
     optionalDependencies:
       fsevents: 2.3.3
+
+  webgpu@0.4.0:
+    dependencies:
+      '@webgpu/types': 0.1.72
+      debug: 4.4.3
+    transitivePeerDependencies:
+      - supports-color
 
   webpack-virtual-modules@0.6.2: {}
 

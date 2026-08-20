@@ -1,4 +1,4 @@
-import type { BrushDesc, BrushKindName, BrushOpName } from '../field/brush.ts';
+import { defaultBrushSet, type BrushDesc, type BrushOpName, type BrushSet } from '../field/brush.ts';
 
 /**
  * One primitive in a shape, plus the CSG operation that folds it into everything
@@ -81,8 +81,14 @@ export class Shape {
   }
 }
 
-const prim = (kind: BrushKindName, n: Omit<ShapeNode, 'kind'>): Shape =>
+const prim = (kind: string, n: Omit<ShapeNode, 'kind'>): Shape =>
   new Shape([{ kind, ...n }]);
+
+/** Params a custom primitive is handed. They mean whatever its `sdf` says they mean. */
+export interface CustomParams {
+  size?: readonly [number, number, number] | number;
+  radius?: number;
+}
 
 /**
  * Primitives are authored at the origin in their own local space and moved with
@@ -104,6 +110,15 @@ export const sdf = {
   plane: (y = 0) => prim('plane', { radius: y }),
   boxFrame: (half: readonly [number, number, number], thickness: number) =>
     prim('boxFrame', { size: half, radius: thickness }),
+
+  /**
+   * A primitive registered under `name` in `Game.create({ brushes })`. `size` and `radius`
+   * are passed straight to its distance function, so what they mean is up to the brush.
+   *
+   * The name is not checked here - a shape is just data - but building a field out of one
+   * the set does not know throws with the list of names it does.
+   */
+  custom: (name: string, params: CustomParams = {}) => prim(name, params),
 
   /** Smooth union of everything given. */
   union: (...shapes: readonly Shape[]): Shape =>
@@ -155,35 +170,16 @@ export function compileShape(
   }));
 }
 
-/** Half-extent of one primitive about its own origin, before its `pos` offset. */
-function nodeReach(n: ShapeNode): number {
-  const s = n.size;
-  const size: [number, number, number] = typeof s === 'number'
-    ? [s, s, s]
-    : s ? [s[0], s[1], s[2]] : [1, 1, 1];
-  const r = n.radius ?? 0;
-  const scale = n.scale ?? 1;
-  switch (n.kind) {
-    case 'sphere':
-      return size[0] * scale;
-    case 'capsule':
-      return (size[1] + r) * scale;
-    case 'torus':
-      return (size[0] + r) * scale;
-    case 'plane':
-      return Number.POSITIVE_INFINITY;
-    default:
-      return (Math.hypot(size[0], size[1], size[2]) + r) * scale;
-  }
-}
-
 /**
  * Conservative sphere around a shape's *additive* primitives. Subtractions and paints
  * never grow a body, so they are ignored; a shape made only of those has no bounds.
  * Used to size a clay body's extraction box, its collider and its bake, so those are
  * derived from the shape instead of being a number the game has to keep in sync.
+ *
+ * The per-primitive reach comes from `brushSet`, the same number the GPU tile cull uses,
+ * so a custom brush declares its extent once and both agree.
  */
-export function shapeBounds(shape: Shape): {
+export function shapeBounds(shape: Shape, brushSet: BrushSet = defaultBrushSet): {
   center: [number, number, number];
   radius: number;
 } {
@@ -193,7 +189,8 @@ export function shapeBounds(shape: Shape): {
     if (n.op === 'cut' || n.op === 'paint') {
       continue;
     }
-    const reach = nodeReach(n) + (n.smooth ?? 0);
+    const reach = brushSet.reachOf(n.kind, n.size, n.radius ?? 0) * (n.scale ?? 1)
+      + (n.smooth ?? 0);
     const p = n.pos ?? [0, 0, 0];
     lo = lo.map((v, i) => Math.min(v, p[i]! - reach));
     hi = hi.map((v, i) => Math.max(v, p[i]! + reach));

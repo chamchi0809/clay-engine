@@ -5,7 +5,6 @@ import { SplatField, bodyCloud } from '../sim/splat.ts';
 import { SurfaceExtractor } from '../sim/extract.ts';
 import { SdfBuilder } from '../field/builder.ts';
 import { SdfVolume } from '../field/volume.ts';
-import { compileBrushes } from '../field/brush.ts';
 import { compileShape, shapeBounds, type Shape } from '../shape/sdf.ts';
 import { d } from '../gpu.ts';
 import { lerpField, offsetField, volumeField, type TracedField } from '../trace/field.ts';
@@ -142,7 +141,7 @@ export class SoftBody extends GameObject {
   constructor(game: Game, options: SoftBodySpawnOptions) {
     super(game);
     const root = game.root;
-    const bounds = shapeBounds(options.shape);
+    const bounds = shapeBounds(options.shape, game.brushSet);
     this.restShape = options.shape;
     this.radius = bounds.radius;
     this.reach = options.reach ?? bounds.radius * 1.4;
@@ -181,8 +180,8 @@ export class SoftBody extends GameObject {
       new SdfVolume(root, { ...volumeOptions, label: `${label}ShapeB` }),
     ];
     this.morphBuilders = [
-      new SdfBuilder(this.morphVolumes[0]),
-      new SdfBuilder(this.morphVolumes[1]),
+      new SdfBuilder(this.morphVolumes[0], { brushSet: game.brushSet }),
+      new SdfBuilder(this.morphVolumes[1], { brushSet: game.brushSet }),
     ];
     this.blend = root.createUniform(d.f32, 0);
     this.origin = root.createUniform(d.vec3f, d.vec3f(...(options.position ?? [0, 0, 0])));
@@ -351,7 +350,7 @@ export class SoftBody extends GameObject {
    * shape is baked into a volume rather than compiled into a shader.
    */
   morph(shape: Shape): void {
-    const reach = shapeBounds(shape).radius;
+    const reach = shapeBounds(shape, this.game.brushSet).radius;
     if (reach > this.reach) {
       throw new Error(
         `SoftBody.morph: shape reaches ${reach.toFixed(2)} but the body was built for `
@@ -425,8 +424,7 @@ export class SoftBody extends GameObject {
 
   /** The morph volumes are body-local, so the shape is baked about the origin. */
   private setShapeBrushes(slot: number, shape: Shape): void {
-    this.morphBuilders[slot]!.setBrushes(
-      compileBrushes(compileShape(shape, (n) => this.game.material(n))),
-    );
+    const builder = this.morphBuilders[slot]!;
+    builder.setBrushes(builder.brushSet.compile(compileShape(shape, (n) => this.game.material(n))));
   }
 }

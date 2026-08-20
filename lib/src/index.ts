@@ -24,6 +24,8 @@
 export * from './shape/sdf.ts';
 export * from './game/index.ts';
 export type { MaterialValue, DirLightValue } from './trace/shade.ts';
+/** For `Game.create({ brushes })`. The one place the game API asks for GPU code. */
+export type { CustomBrush } from './field/brush.ts';
 export type { TracedField } from './trace/field.ts';
 export type { ShadingOptions } from './trace/shade.ts';
 export type { TracerOptions } from './trace/march.ts';

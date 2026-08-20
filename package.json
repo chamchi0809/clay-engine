@@ -1,0 +1,23 @@
+{
+  "name": "clay-engine-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "dev": "pnpm --filter clay-demo dev",
+    "dev:analytic": "pnpm --filter clay-example-analytic dev",
+    "build": "pnpm --filter clay-demo build && pnpm --filter clay-example-analytic build",
+    "typecheck": "tsc -p lib && tsc -p demo && tsc -p examples/analytic",
+    "test": "node --test \"lib/test/**/*.test.mjs\"",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.70",
+    "typescript": "npm:tsover@6.0.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "typescript": "npm:tsover@6.0.2"
+    }
+  }
+}

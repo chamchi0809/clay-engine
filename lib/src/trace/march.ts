@@ -78,6 +78,16 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
   // Hops move by 2, so start on a level that lands exactly on `minMip` on the way down.
   const startMip = minMip + (maxMip - minMip - ((maxMip - minMip) % 2));
   const hitMip = minMip + 0.5;
+  /**
+   * Where a sweep is worth starting. A field that bounds itself says so; one that does not
+   * gets marched in from `tMin` as before. Resolved here, when the tracer is built, so the
+   * shader carries no branch for it.
+   */
+  const startAt = field.entry
+    ?? ((_ro: d.v3f, _rd: d.v3f, tMin: number, _radius: number, _aperture: number) => {
+      'use gpu';
+      return tMin;
+    });
 
   /**
    * `radius` grows the swept sphere by a constant, `aperture` grows it with distance.
@@ -95,10 +105,12 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
     const invGrowth = 1 / (1 + aperture);
     const minStep = field.voxelWorld(0) * minStepVoxels;
     const hitEps = field.voxelWorld(minMip) * hitEpsVoxels;
-    let t = tMin;
+    // Nothing before this can be touched, so nothing before it is worth sampling. For a
+    // field with no bounds of its own this is `tMin` and the loop is unchanged.
+    const tStart = startAt(ro, rd, tMin, radius, aperture);
+    let t = tStart;
     // Start coarse, on an even level so `mip -= 2` lands on 0 exactly.
     let mip = d.f32(startMip);
-    let prev = d.f32(0);
     let dist = d.f32(0);
     let hit = d.u32(0);
     let steps = d.u32(0);
@@ -121,6 +133,17 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
       // Tangency target for this sweep kind: 0 for a ray, `radius` for a sphere sweep,
       // `aperture * t` for a cone. `hitEps` is what makes a zero-radius ray terminate.
       const target = radius + aperture * t;
+      // The discount can swallow a coarse level's whole reading, and then the step below
+      // collapses to `minStep` and the trace crawls. A saturated *texture* sample can never
+      // do that - a band is four voxels wide, so `safe` there is at least three of them -
+      // but a field answering with a conservative bound of its own can, and a sweep that
+      // leaves a bounded field re-enters that case for the rest of the interval. Going
+      // finer is what makes the reading trustworthy again, so do that instead of crawling.
+      if (safe <= 0 && mip >= hitMip) {
+        mip = std.max(mip - 2, minMip);
+        t = std.max(t - 0.5 * field.voxelWorld(mip), tStart);
+        continue;
+      }
       // A saturated sample means "at least a full band of empty space", so it can never
       // be a surface. That is also what keeps a field's conservative bounds (the volume
       // box in `volumeField`) from reading as geometry: they report saturation.
@@ -132,7 +155,7 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
           // value is also the only hop-down trigger needed: it fires exactly when this
           // level can no longer promise empty space.
           mip = std.max(mip - 2, minMip);
-          t = std.max(t - 0.5 * field.voxelWorld(mip), tMin);
+          t = std.max(t - 0.5 * field.voxelWorld(mip), tStart);
           continue;
         }
         hit = 1;
@@ -149,7 +172,6 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
         break;
       }
 
-      prev = dist;
       // The tangency step never crosses the surface: with `D = dist(p(t))` and
       // `t' = (t + D - radius)/(1 + aperture)`, the Lipschitz bound gives
       // `dist(p(t')) >= D - (t' - t) = radius + aperture*t'`. So every `t` the loop

@@ -36,7 +36,55 @@ export interface TracedField {
   readonly voxelWorld: (mip: number) => number;
   /** Unit surface normal. */
   readonly normal: (p: d.v3f) => d.v3f;
+  /**
+   * First `t` at or after `tMin` at which a shape swept with radius `radius + aperture*t`
+   * could touch anything this field is able to hold, or {@link NEVER} when it never can.
+   *
+   * Optional, and only ever an optimisation: a field that leaves it out is marched in from
+   * `tMin` exactly as before. It is here because marching *towards* a bounded field is
+   * anything but free. A volume answers "distance to my box" outside its box, saturated so
+   * that the box cannot read as a surface; the tracer discounts every step by 0.87 of the
+   * voxel it read, which at the coarsest of five mips is fourteen mip-0 voxels; so the
+   * discounted step went to zero a coarse voxel out and the last stretch of the approach
+   * was walked at the minimum step size - sixty steps to arrive, before a single one had
+   * been spent on the scene. The pre-pass has sixty-four in total, so it never arrived at
+   * all, every primary ray started from scratch, and at a grazing angle the primaries ran
+   * out too and a swathe of the picture came back as sky.
+   */
+  readonly entry?: (
+    ro: d.v3f,
+    rd: d.v3f,
+    tMin: number,
+    radius: number,
+    aperture: number,
+  ) => number;
 }
+
+/**
+ * What {@link TracedField.entry} reports when the ray never touches the field: past any
+ * `tMax` a caller would reasonably pass, so the tracer's own interval check ends the sweep
+ * on its first iteration. Finite rather than infinite, because `ro + rd * t` at infinity
+ * is a NaN waiting to happen.
+ */
+export const NEVER = 1e9;
+
+/**
+ * `(tNear, tFar)` of a ray against an axis-aligned box, given the ray origin relative to
+ * the box centre and the reciprocal of its direction.
+ *
+ * `inv` must have no zero component - see the caller for why that is the only care needed.
+ */
+const slabRange = (rel: d.v3f, half: d.v3f, inv: d.v3f) => {
+  'use gpu';
+  const a = (std.neg(half) - rel) * inv;
+  const b = (half - rel) * inv;
+  const lo = std.min(a, b);
+  const hi = std.max(a, b);
+  return d.vec2f(
+    std.max(std.max(lo.x, lo.y), lo.z),
+    std.min(std.min(hi.x, hi.y), hi.z),
+  );
+};
 
 /** Adapts a mip-mapped {@link SdfVolume} to {@link TracedField}. */
 export function volumeField(volume: SdfVolume): TracedField {
@@ -66,6 +114,28 @@ export function volumeField(volume: SdfVolume): TracedField {
       return voxel0 * std.exp2(d.f32(mip));
     },
     normal: volume.gradient,
+    entry: (ro: d.v3f, rd: d.v3f, tMin: number, radius: number, aperture: number) => {
+      'use gpu';
+      const rel = ro - layout.$.params.center;
+      const half = layout.$.params.halfExtent;
+      // Sign-preserving and never zero. A component of exactly zero means the ray runs
+      // parallel to that pair of faces, and either sign of a huge reciprocal answers that
+      // correctly: both crossings then land on the same side, so the slab either never
+      // opens (origin outside it) or never closes (origin inside it).
+      const inv = std.div(
+        d.vec3f(1),
+        std.select(rd, d.vec3f(1e-8), std.lt(std.abs(rd), d.vec3f(1e-8))),
+      );
+      // A swept shape is fatter than its axis, so the box to test is the real one grown by
+      // the radius at the moment of arrival - which is what is being solved for. Two
+      // passes settle it: growing a box only ever pulls the entry earlier, so the first
+      // pass's `t` is an upper bound on the radius the second pass has to allow for.
+      const bare = slabRange(rel, half, inv);
+      const grow = d.vec3f(radius + aperture * std.max(bare.x, tMin));
+      const grown = slabRange(rel, half + grow, inv);
+      const t = std.max(grown.x, tMin);
+      return std.select(d.f32(NEVER), t, grown.y >= t);
+    },
   };
 }
 
@@ -132,9 +202,22 @@ export function analyticField(
  */
 export function unionField(a: TracedField, b: TracedField): TracedField {
   const maxMip = Math.min(a.maxMip, b.maxMip);
+  const entryA = a.entry;
+  const entryB = b.entry;
   return {
     maxMip,
     groups: [...a.groups, ...b.groups],
+    // Both or neither: a child that will not bound itself may hold a surface anywhere, so
+    // one unbounded child is enough to make the union unbounded.
+    entry: entryA && entryB
+      ? (ro: d.v3f, rd: d.v3f, tMin: number, radius: number, aperture: number) => {
+        'use gpu';
+        return std.min(
+          entryA(ro, rd, tMin, radius, aperture),
+          entryB(ro, rd, tMin, radius, aperture),
+        );
+      }
+      : undefined,
     sample: (p: d.v3f, mip: number) => {
       'use gpu';
       const sa = a.sample(p, mip);
@@ -184,9 +267,22 @@ export function unionField(a: TracedField, b: TracedField): TracedField {
  */
 export function lerpField(a: TracedField, b: TracedField, t: () => number): TracedField {
   const maxMip = Math.min(a.maxMip, b.maxMip);
+  const entryA = a.entry;
+  const entryB = b.entry;
   return {
     maxMip,
     groups: [...a.groups, ...b.groups],
+    // A mix of two positive distances is positive, so the blended surface never leaves the
+    // union of the two solids and the union's bound covers it at every `t`.
+    entry: entryA && entryB
+      ? (ro: d.v3f, rd: d.v3f, tMin: number, radius: number, aperture: number) => {
+        'use gpu';
+        return std.min(
+          entryA(ro, rd, tMin, radius, aperture),
+          entryB(ro, rd, tMin, radius, aperture),
+        );
+      }
+      : undefined,
     sample: (p: d.v3f, mip: number) => {
       'use gpu';
       const k = std.clamp(t(), 0, 1);
@@ -235,9 +331,17 @@ export function lerpField(a: TracedField, b: TracedField, t: () => number): Trac
  * system that works in world space.
  */
 export function offsetField(field: TracedField, offset: () => d.v3f): TracedField {
+  const entry = field.entry;
   return {
     maxMip: field.maxMip,
     groups: field.groups,
+    // A translation moves the origin, not the direction, and leaves `t` itself alone.
+    entry: entry
+      ? (ro: d.v3f, rd: d.v3f, tMin: number, radius: number, aperture: number) => {
+        'use gpu';
+        return entry(ro - offset(), rd, tMin, radius, aperture);
+      }
+      : undefined,
     sample: (p: d.v3f, mip: number) => {
       'use gpu';
       return field.sample(p - offset(), mip);

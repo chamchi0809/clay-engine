@@ -2,14 +2,14 @@ import { ParticleMesh } from '../sim/meshdraw.ts';
 import { ParticleSet, type BodyTracker } from '../sim/particles.ts';
 import { ClaySolver } from '../sim/pbd.ts';
 import { SplatField, bodyCloud } from '../sim/splat.ts';
-import { SurfaceExtractor } from '../sim/extract.ts';
+import { ExtractMotion, SurfaceExtractor } from '../sim/extract.ts';
 import { SdfBuilder } from '../field/builder.ts';
 import { SdfVolume } from '../field/volume.ts';
 import { compileShape, shapeBounds, type Shape } from '../shape/sdf.ts';
 import { d } from '../gpu.ts';
 import { lerpField, offsetField, volumeField, type TracedField } from '../trace/field.ts';
 import { GameObject, type EntityContext, type ForceMode } from './entity.ts';
-import type { TgpuComputePass, TgpuRenderCommands, TgpuUniform } from 'typegpu';
+import type { TgpuComputePass, TgpuMutable, TgpuRenderCommands, TgpuUniform } from 'typegpu';
 import type { Game } from './game.ts';
 
 export interface SoftBodySpawnOptions {
@@ -114,8 +114,8 @@ export class SoftBody extends GameObject {
   private readonly morphVolumes: [SdfVolume, SdfVolume];
   private readonly morphBuilders: [SdfBuilder, SdfBuilder];
   private readonly blend: TgpuUniform<d.F32>;
-  /** Where the body-local morph volumes sit in the world. */
-  private readonly origin: TgpuUniform<d.Vec3f>;
+  /** GPU-side translation and linear velocity of the body-local morph volumes. */
+  private readonly motion: TgpuMutable<typeof ExtractMotion>;
   private readonly surface: SplatField;
   private readonly solverOptions: { gravity: number; friction: number };
   private readonly resolution: number;
@@ -134,6 +134,8 @@ export class SoftBody extends GameObject {
   /** Which of the morph volumes still needs its shape baked. */
   private bakeDirty: [boolean, boolean] = [true, true];
   private extractQueued = true;
+  /** False for a spawn/teleport, true when re-extracting the live particle cloud. */
+  private preserveMotion = false;
   /** Accumulated this frame, cleared after the step. */
   private accel: [number, number, number] = [0, 0, 0];
   private impulse: [number, number, number] = [0, 0, 0];
@@ -184,12 +186,17 @@ export class SoftBody extends GameObject {
       new SdfBuilder(this.morphVolumes[1], { brushSet: game.brushSet }),
     ];
     this.blend = root.createUniform(d.f32, 0);
-    this.origin = root.createUniform(d.vec3f, d.vec3f(...(options.position ?? [0, 0, 0])));
+    const spawn = options.position ?? [0, 0, 0];
+    this.motion = root.createMutable(ExtractMotion, {
+      center: [spawn[0], spawn[1], spawn[2]],
+      _padA: 0,
+      velocity: [0, 0, 0],
+      _padB: 0,
+    });
     const blend = this.blend;
-    const origin = this.origin;
-    // The shape volumes are baked about the origin once and then *moved*, rather than
-    // rebaked wherever the body happens to be. A translation costs one uniform write;
-    // a rebake costs a full volume build every frame the body is in motion.
+    const motion = this.motion;
+    // The shape volumes are baked about the origin once and then *moved* by GPU-side
+    // state, rather than rebaked wherever the body happens to be.
     const morphField = offsetField(
       lerpField(
         volumeField(this.morphVolumes[0]),
@@ -202,7 +209,7 @@ export class SoftBody extends GameObject {
       () => {
         'use gpu';
         // A copy, not the reference: TypeGPU cannot return a storage reference.
-        return d.vec3f(origin.$);
+        return d.vec3f(motion.$.center);
       },
     );
     this.setShapeBrushes(0, this.restShape);
@@ -256,6 +263,7 @@ export class SoftBody extends GameObject {
       body: this.body,
       base: 0,
       capacity: 3000,
+      motion: this.motion,
       label: 'softBodyShell',
     });
     // Everything hittable except this body itself - a body that collides with its own
@@ -337,11 +345,18 @@ export class SoftBody extends GameObject {
   /** Moves the body without simulating the trip, and rebuilds it from its rest shape. */
   setPosition(p: readonly [number, number, number]): void {
     this.tracker.reset(p);
+    this.motion.write({
+      center: [p[0], p[1], p[2]],
+      _padA: 0,
+      velocity: [0, 0, 0],
+      _padB: 0,
+    });
     // Finish any morph in flight *including its blend*: leaving `blend` where the
     // animation stopped leaves the body stuck at whatever shape it was passing through.
     this.morphT = 1;
     this.writeBlend(1);
     this.extractQueued = true;
+    this.preserveMotion = false;
   }
 
   /**
@@ -378,16 +393,16 @@ export class SoftBody extends GameObject {
       this.writeBlend(this.morphT);
     }
     if (this.extractQueued) {
-      const p = this.position;
-      this.origin.write(d.vec3f(p[0], p[1], p[2]));
       const half = this.box * 0.5;
       this.extractor.setRegion(
-        [p[0] - half, p[1] - half, p[2] - half],
+        [-half, -half, -half],
         this.box,
-        this.velocity,
+        [0, 0, 0],
+        this.preserveMotion,
       );
       this.extractor.extract(pass);
       this.extractQueued = false;
+      this.preserveMotion = true;
     }
     this.solver.setForce(this.body, this.accel, this.impulse);
     this.accel = [0, 0, 0];

@@ -22,9 +22,25 @@ export const ExtractRegion = d.struct({
    * is what shape morphing is - otherwise drops it dead in mid-air.
    */
   vel: d.vec3f,
-  _pad: d.f32,
+  /** Keep an existing body's GPU-side centre and mean velocity while re-extracting. */
+  preserveMotion: d.u32,
 });
 export type ExtractRegionValue = d.InferInput<typeof ExtractRegion>;
+
+/**
+ * GPU-side transform shared by an extractor and a body-local source field.
+ *
+ * Keeping this state on the GPU is important during a morph: CPU body tracking is an
+ * asynchronous readback, so using it as the next frame's extraction centre creates a
+ * delayed feedback loop that repeatedly teleports the body to an old position.
+ */
+export const ExtractMotion = d.struct({
+  center: d.vec3f,
+  _padA: d.f32,
+  velocity: d.vec3f,
+  _padB: d.f32,
+});
+export type ExtractMotionValue = d.InferInput<typeof ExtractMotion>;
 
 /** Threads in the single-workgroup finish pass. */
 const REDUCE_THREADS = 256;
@@ -40,6 +56,12 @@ export interface SurfaceExtractorOptions {
   base: number;
   /** Particles this extractor may emit into its slice. */
   capacity: number;
+  /**
+   * Optional transform for a body-local field. The scan region becomes relative to its
+   * centre, and re-extraction can snapshot the existing cloud's centre and mean velocity
+   * into it without a CPU readback.
+   */
+  motion?: TgpuMutable<typeof ExtractMotion>;
   label?: string;
 }
 
@@ -81,7 +103,7 @@ export class SurfaceExtractor {
   constructor(set: ParticleSet, field: TracedField, options: SurfaceExtractorOptions) {
     const root = set.root;
     const res = options.resolution ?? 32;
-    const { body, base, capacity } = options;
+    const { body, base, capacity, motion } = options;
     if (base + capacity > set.capacity) {
       throw new Error(`SurfaceExtractor: slice [${base}, ${base + capacity}) exceeds set capacity`);
     }
@@ -104,7 +126,7 @@ export class SurfaceExtractor {
       origin: [0, 0, 0],
       cell: 0.1,
       vel: [0, 0, 0],
-      _pad: 0,
+      preserveMotion: 0,
     });
     this.region = region;
     const counters = root.createMutable(SimCounters).$name(`${label}Counters`);
@@ -149,14 +171,87 @@ export class SurfaceExtractor {
       'use gpu';
       return idGrid.$[flat(c)];
     };
+    const scanOrigin = motion
+      ? () => {
+          'use gpu';
+          return region.$.origin + motion.$.center;
+        }
+      : () => {
+          'use gpu';
+          return d.vec3f(region.$.origin);
+        };
+    const emittedVelocity = motion
+      ? () => {
+          'use gpu';
+          return d.vec3f(motion.$.velocity);
+        }
+      : () => {
+          'use gpu';
+          return d.vec3f(region.$.vel);
+        };
 
-    const resetPipeline = root.createComputePipeline({
-      compute: tgpu.computeFn({ workgroupSize: [1] })(() => {
-        'use gpu';
-        std.atomicStore(counters.$.particles, 0);
-        std.atomicStore(counters.$.quads, 0);
-      }),
-    });
+    // When a caller supplies `motion`, take both values from the live particle cloud in
+    // the same command stream that replaces it. A CPU readback is several frames late and
+    // arrives at an irregular cadence; feeding that staircase back into extraction makes a
+    // moving morph jump backwards and forwards.
+    const resetPipeline = motion
+      ? (() => {
+          const MotionSum = d.struct({ position: d.vec3f, velocity: d.vec3f });
+          const sums = tgpu.workgroupVar(d.arrayOf(MotionSum, REDUCE_THREADS));
+          return root.createComputePipeline({
+            compute: tgpu.computeFn({
+              workgroupSize: [REDUCE_THREADS],
+              in: { lid: d.builtin.localInvocationId },
+            })(({ lid }) => {
+              'use gpu';
+              const li = lid.x;
+              const bd = bodies.$[body];
+              const keep = region.$.preserveMotion !== d.u32(0);
+              let positionSum = d.vec3f();
+              let velocitySum = d.vec3f();
+              if (keep) {
+                for (let t = li; t < bd.count; t = t + d.u32(REDUCE_THREADS)) {
+                  const p = particles.$[bd.first + t];
+                  positionSum = positionSum + p.pos;
+                  velocitySum = velocitySum + p.vel;
+                }
+              }
+              sums.$[li] = MotionSum({ position: positionSum, velocity: velocitySum });
+              std.workgroupBarrier();
+              for (let s = d.u32(REDUCE_THREADS / 2); s > d.u32(0); s = s >>> 1) {
+                if (li < s) {
+                  const a = sums.$[li];
+                  const b = sums.$[li + s];
+                  sums.$[li] = MotionSum({
+                    position: a.position + b.position,
+                    velocity: a.velocity + b.velocity,
+                  });
+                }
+                std.workgroupBarrier();
+              }
+              if (li === d.u32(0)) {
+                if (keep && bd.count > d.u32(0)) {
+                  const inv = 1 / d.f32(bd.count);
+                  motion.$ = ExtractMotion({
+                    center: sums.$[0].position * inv,
+                    _padA: 0,
+                    velocity: sums.$[0].velocity * inv,
+                    _padB: 0,
+                  });
+                }
+                std.atomicStore(counters.$.particles, 0);
+                std.atomicStore(counters.$.quads, 0);
+              }
+            }),
+          });
+        })()
+      : root.createComputePipeline({
+          compute: tgpu.computeFn({ workgroupSize: [1] })(() => {
+            'use gpu';
+            std.atomicStore(counters.$.particles, 0);
+            std.atomicStore(counters.$.quads, 0);
+          }),
+        });
 
     const cellPipeline = root.createComputePipeline({
       compute: tgpu.computeFn({
@@ -169,7 +264,7 @@ export class SurfaceExtractor {
         }
         const idx = flat(gid);
         const c = region.$.cell;
-        const p0 = region.$.origin + d.vec3f(gid) * c;
+        const p0 = scanOrigin() + d.vec3f(gid) * c;
         const px = p0 + d.vec3f(c, 0, 0);
         const py = p0 + d.vec3f(0, c, 0);
         const pz = p0 + d.vec3f(0, 0, c);
@@ -220,9 +315,9 @@ export class SurfaceExtractor {
           body: d.u32(body),
           prev: p,
           material: field.field(p, 0).y,
-          vel: region.$.vel,
+          vel: emittedVelocity(),
           _padA: 0,
-          velPrev: region.$.vel,
+          velPrev: emittedVelocity(),
           _padB: 0,
           rest: p,
           _padC: 0,
@@ -267,7 +362,7 @@ export class SurfaceExtractor {
         // This thread owns lattice point `gid` and the three edges leaving it towards
         // +x/+y/+z. Every edge of the lattice is owned exactly once.
         const c = region.$.cell;
-        const l = region.$.origin + d.vec3f(gid) * c;
+        const l = scanOrigin() + d.vec3f(gid) * c;
         const dL = dist(l);
         const inside = dL < 0;
         const i = gid.x;
@@ -348,17 +443,22 @@ export class SurfaceExtractor {
     this.pipelines = [resetPipeline, cellPipeline, quadPipeline, finishPipeline];
   }
 
-  /** Moves the scanned box. `cell` is the lattice spacing, so `res * cell` is its size. */
+  /**
+   * Moves the scanned box. `cell` is the lattice spacing, so `res * cell` is its size.
+   * With `motion`, `origin` is relative to its centre and `preserveMotion` snapshots the
+   * existing cloud immediately before it is replaced.
+   */
   setRegion(
     origin: readonly [number, number, number],
     size: number,
     vel: readonly [number, number, number] = [0, 0, 0],
+    preserveMotion = false,
   ): void {
     this.region.write({
       origin: [origin[0], origin[1], origin[2]],
       cell: size / this.resolution,
       vel: [vel[0], vel[1], vel[2]],
-      _pad: 0,
+      preserveMotion: preserveMotion ? 1 : 0,
     });
   }
 

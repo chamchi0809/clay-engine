@@ -1,6 +1,7 @@
 import tgpu, { d, std } from 'typegpu';
 import type { TgpuComputePass, TgpuComputePipeline, TgpuRoot } from 'typegpu';
 import { SdfVolume, TILE, volumeWriteLayout } from '../field/volume.ts';
+import { quatRotate } from '../math/gpu.ts';
 import { volumeField, type TracedField } from '../trace/field.ts';
 import type { ParticleSet } from './particles.ts';
 
@@ -18,6 +19,22 @@ export interface ParticleCloud {
   readonly positionAt: (i: number) => d.v3f;
   /** GPU scope: whether particle `i` contributes to the surface this frame. */
   readonly liveAt: (i: number) => boolean;
+  /**
+   * GPU scope: outward unit normal at particle `i`, if the cloud samples a *surface*.
+   *
+   * Optional, and the difference it makes is not subtle. Without it a particle can only
+   * say "there is material within `radius` of me", so the baked iso-surface sits one full
+   * radius *outside* the particles - and a body whose particles double as its mesh
+   * vertices then draws a silhouette that is already well inside its own occluder. Every
+   * AO cone and shadow ray cast from near that silhouette starts out occluded, which is
+   * why a clay ball resting on the floor was ringed in black while a traced sphere of the
+   * same radius beside it was not. With a normal the particle instead says "the surface
+   * passes through me, facing this way" and the iso-surface lands on the particles.
+   *
+   * A cloud with no meaningful orientation - a fluid, a debris spray - leaves this out
+   * and gets the union of spheres, which is the right answer for a blobby volume.
+   */
+  readonly normalAt?: (i: number) => d.v3f;
 }
 
 /**
@@ -41,11 +58,29 @@ export function bodyCloud(set: ParticleSet, body: number): ParticleCloud {
       const b = bodies.$[body];
       return i >= b.first && i < b.first + b.count;
     },
+    // A body's particles come from `SurfaceExtractor`, so each one carries the field's
+    // gradient at the point it was extracted from - the same `restNormal` the mesh draws
+    // with, rotated by the same fitted rotation. Deformation makes it stale, exactly as
+    // it does for the shading normal, but a stale normal still passes through its own
+    // particle: it tilts the surface between neighbours by a fraction of the particle
+    // spacing rather than displacing the whole shell by a radius.
+    normalAt: (i: number) => {
+      'use gpu';
+      return quatRotate(bodies.$[body].rot, particles.$[i].restNormal);
+    },
   };
 }
 
 export interface SplatFieldOptions {
-  /** Radius of the sphere each particle contributes. Sets the surface thickness. */
+  /**
+   * Reach of one particle's contribution.
+   *
+   * What it means depends on whether the cloud has normals. Without them it is the radius
+   * of the sphere each particle contributes, and so it is *also* how far the iso-surface
+   * ends up outside the particles - one number doing two jobs that pull opposite ways.
+   * With them it is only the reach: the radius of the disc a particle's tangent plane is
+   * clipped to, which has to cover the gaps to its neighbours and nothing more.
+   */
   radius: number;
   /** Material id written into the volume. */
   material?: number;
@@ -76,8 +111,9 @@ const ENC_SAT = 65535;
 
 /**
  * Turns any {@link ParticleCloud} into a mip-mapped {@link TracedField}: a union of
- * spheres, scattered into a fixed-point grid with `atomicMin` and resolved into an
- * {@link SdfVolume}. Claybook GDC'18 slides 57-59.
+ * spheres - or of oriented discs, if the cloud has normals - scattered into a fixed-point
+ * grid with `atomicMin` and resolved into an {@link SdfVolume}. Claybook GDC'18 slides
+ * 57-59.
  *
  * Scatter, not gather, and one splat per mip level:
  *
@@ -92,10 +128,10 @@ const ENC_SAT = 65535;
  * `unionField` the result with the world and it is traced, shadowed, AO'd and collided
  * against like anything else - a fluid, a clay body, a debris cloud, all the same code.
  *
- * ponytail: a hard union of spheres, so a thin sheet shows the individual blobs.
- * `atomicMin` cannot express a smooth min; the upgrade is to scatter a fixed-point
- * *density* with `atomicAdd` and take an iso-surface, at the cost of no longer being a
- * Lipschitz-1 distance the tracer can trust directly.
+ * ponytail: a hard union, so a thin sheet shows the individual blobs (or, with normals,
+ * the individual facets). `atomicMin` cannot express a smooth min; the upgrade is to
+ * scatter a fixed-point *density* with `atomicAdd` and take an iso-surface, at the cost
+ * of no longer being a Lipschitz-1 distance the tracer can trust directly.
  */
 export class SplatField {
   readonly volume: SdfVolume;
@@ -126,6 +162,26 @@ export class SplatField {
     });
     this.field = volumeField(this.volume);
     this.cloudGroups = Math.ceil(cloud.capacity / 64);
+
+    // Distance from voxel `delta` (relative to the particle) to what particle `i` puts
+    // there. Picked once, here, so the shader carries no branch and a cloud without
+    // normals compiles to exactly the code it compiled to before.
+    const normalAt = cloud.normalAt;
+    const contribution = normalAt
+      // A half-space intersected with the reach ball: `max` of the two, which is a
+      // Lipschitz-1 under-estimate of the clipped disc's distance and, crucially, is the
+      // plane's own value near the particle - so the zero crossing passes through the
+      // particle instead of standing a radius off it. Beyond the ball the ball's own
+      // distance takes over, so the band outside the surface is still written and the
+      // tracer never reads saturation next to geometry.
+      ? (i: number, delta: d.v3f) => {
+        'use gpu';
+        return std.max(std.dot(delta, normalAt(i)), std.length(delta) - radius);
+      }
+      : (_i: number, delta: d.v3f) => {
+        'use gpu';
+        return std.length(delta) - radius;
+      };
 
     const levelRes: number[] = [];
     const levelOffsets: number[] = [];
@@ -186,7 +242,7 @@ export class SplatField {
               for (let y = std.max(lo.y, 0); y <= std.min(hi.y, last); y++) {
                 for (let x = std.max(lo.x, 0); x <= std.min(hi.x, last); x++) {
                   const c = (d.vec3f(d.f32(x), d.f32(y), d.f32(z)) + d.vec3f(0.5)) * voxel;
-                  const sd = std.length(c - p) - radius;
+                  const sd = contribution(i, c - p);
                   if (sd < bandWorld) {
                     const e = d.u32((std.clamp(sd / bandWorld, -1, 1) + 1) * ENC_SCALE);
                     const idx = d.u32(off) + d.u32(x) + d.u32(r) * (d.u32(y) + d.u32(r) * d.u32(z));

@@ -18,7 +18,12 @@ export type FieldGroups = readonly ReturnType<TgpuRoot['createBindGroup']>[];
  * decides a mip hop - Claybook GDC'18 slide 24).
  */
 export interface TracedField {
-  /** Coarsest mip index. A JS constant, so the tracer can bake loop bounds. */
+  /**
+   * Coarsest mip index this field has detail for. A JS constant, so the tracer can bake
+   * loop bounds. It is a statement about resolution, not a limit on what may be asked:
+   * a union traces at its deepest child's depth and every child has to answer at that
+   * depth (see `sample`).
+   */
   readonly maxMip: number;
   /**
    * Bind groups every pipeline using this field must be `.with()`-ed. Empty for a
@@ -26,9 +31,16 @@ export interface TracedField {
    * which.
    */
   readonly groups: FieldGroups;
-  /** `(worldDistance, normalisedBandValue)` at `mip`. */
+  /**
+   * `(worldDistance, normalisedBandValue)` at `mip`.
+   *
+   * `.x` must be a lower bound on the true distance for *any* `mip >= 0`, including one
+   * past `maxMip`; an implementation with nothing coarser to read answers from the
+   * coarsest level it has. `bandWorld` and `voxelWorld` must then describe that same
+   * level, so the tracer's interpolation discount matches the reading it discounts.
+   */
   readonly sample: (p: d.v3f, mip: number) => d.v2f;
-  /** `(worldDistance, materialId)` at `mip`. */
+  /** `(worldDistance, materialId)` at `mip`. Same clamping rule as `sample`. */
   readonly field: (p: d.v3f, mip: number) => d.v2f;
   /** World-space half-width of the stored band at `mip`. */
   readonly bandWorld: (mip: number) => number;
@@ -90,11 +102,35 @@ const slabRange = (rel: d.v3f, half: d.v3f, inv: d.v3f) => {
 export function volumeField(volume: SdfVolume): TracedField {
   const layout = volume.layout;
   const sampleRaw = volume.sampleRaw;
-  const bandWorld = volume.bandWorld;
+  const rawBand = volume.bandWorld;
+  const rawField = volume.sampleField;
   const voxel0 = volume.voxelSize;
+  const maxMip = volume.mipLevels - 1;
+
+  /**
+   * Answers a query above this volume's own top level from that top level instead.
+   *
+   * A volume's mip depth follows its resolution, so volumes that share a scene rarely
+   * share a depth: a 32-cube body bake carries two levels against a 128-cube world's
+   * four. A union has to be traced at one hierarchy, and taking the shallower one would
+   * drag the world down to mip 0 - shadow rays crossing a 24-unit scene at the finest
+   * level, in sixty-four steps. Clamping instead costs the *small* volume nothing it had:
+   * the reading is still a true conservative distance, because it is one at the level it
+   * actually came from, and band, voxel size and hence the tracer's interpolation
+   * discount are all taken at that same level, so the step is merely shorter than a
+   * deeper volume's would have been. Never longer, which is the only thing that matters.
+   */
+  const capped = (mip: number) => {
+    'use gpu';
+    return std.min(d.f32(mip), d.f32(maxMip));
+  };
+  const bandWorld = (mip: number) => {
+    'use gpu';
+    return rawBand(capped(mip));
+  };
 
   return {
-    maxMip: volume.mipLevels - 1,
+    maxMip,
     groups: [volume.bindGroup],
     sample: (p: d.v3f, mip: number) => {
       'use gpu';
@@ -104,14 +140,18 @@ export function volumeField(volume: SdfVolume): TracedField {
       if (dBox > 0) {
         return d.vec2f(dBox, 1);
       }
-      const raw = sampleRaw(p, mip).x;
-      return d.vec2f(raw * bandWorld(mip), raw);
+      const m = capped(mip);
+      const raw = sampleRaw(p, m).x;
+      return d.vec2f(raw * rawBand(m), raw);
     },
-    field: volume.sampleField,
+    field: (p: d.v3f, mip: number) => {
+      'use gpu';
+      return rawField(p, capped(mip));
+    },
     bandWorld,
     voxelWorld: (mip: number) => {
       'use gpu';
-      return voxel0 * std.exp2(d.f32(mip));
+      return voxel0 * std.exp2(capped(mip));
     },
     normal: volume.gradient,
     entry: (ro: d.v3f, rd: d.v3f, tMin: number, radius: number, aperture: number) => {
@@ -196,12 +236,15 @@ export function analyticField(
 }
 
 /**
- * Union of two fields, traced as one. Both must agree on mip structure, so the
- * coarser one is queried at its own `maxMip` clamp. Claybook needed exactly this for
- * "clay world + fluid" (slide 60); nothing about it is Claybook-specific.
+ * Union of two fields, traced as one. Claybook needed exactly this for "clay world +
+ * fluid" (slide 60); nothing about it is Claybook-specific.
+ *
+ * The union is traced at the *deeper* of the two hierarchies and the shallower child
+ * clamps its own queries - see {@link TracedField.sample}. The other way round, a small
+ * bake joining the scene would flatten the whole trace to its own two levels.
  */
 export function unionField(a: TracedField, b: TracedField): TracedField {
-  const maxMip = Math.min(a.maxMip, b.maxMip);
+  const maxMip = Math.max(a.maxMip, b.maxMip);
   const entryA = a.entry;
   const entryB = b.entry;
   return {
@@ -222,9 +265,25 @@ export function unionField(a: TracedField, b: TracedField): TracedField {
       'use gpu';
       const sa = a.sample(p, mip);
       const sb = b.sample(p, mip);
-      // Distance takes the nearer surface; the normalised value must take the
-      // *smaller* saturation or the tracer would hop up over a nearby surface.
-      return d.vec2f(std.min(sa.x, sb.x), std.min(sa.y, sb.y));
+      // The whole pair from the nearer child, not a `min` of each half separately.
+      //
+      // `.y` is not a second opinion on distance. It says whether *this* `.x` is a band
+      // reading or a saturated one, and saturation is the tracer's only proof that a
+      // small number cannot be a surface. Taking the halves from different children
+      // throws that away, and the two answers a bounded field gives are exactly the pair
+      // that then reads as geometry: just outside its box, `volumeField` returns the
+      // distance to the box, saturated - which is near zero at the wall and completely
+      // safe on its own, because saturation forbids a hit. Pair that zero with the
+      // *world's* unsaturated `.y` from a point near the floor and the tracer sees a
+      // surface a millimetre away in every direction. A soft body drew the wall of its
+      // own bake box on the floor as a hard-edged black square, in cast shadow and in AO
+      // alike, and the square moved with the body.
+      //
+      // Nothing is lost by not taking the smaller `.y`: a saturated nearer child really
+      // does promise a full band of empty space, the further child is further still, and
+      // the hop-up it permits is separately gated on the distance being large enough for
+      // the level being hopped to (see `march.ts`).
+      return std.select(sb, sa, sa.x < sb.x);
     },
     field: (p: d.v3f, mip: number) => {
       'use gpu';
@@ -266,7 +325,7 @@ export function unionField(a: TracedField, b: TracedField): TracedField {
  * frame and the body flows from one shape into the other.
  */
 export function lerpField(a: TracedField, b: TracedField, t: () => number): TracedField {
-  const maxMip = Math.min(a.maxMip, b.maxMip);
+  const maxMip = Math.max(a.maxMip, b.maxMip);
   const entryA = a.entry;
   const entryB = b.entry;
   return {
@@ -288,8 +347,12 @@ export function lerpField(a: TracedField, b: TracedField, t: () => number): Trac
       const k = std.clamp(t(), 0, 1);
       const sa = a.sample(p, mip);
       const sb = b.sample(p, mip);
-      // Saturation takes the min, as in `unionField`: a level may only be skipped when
-      // *both* inputs promise a full band of empty space.
+      // The blended distance has no single child to take a saturation flag from, so it
+      // takes the smaller: a level may only be skipped when *both* inputs promise a full
+      // band of empty space. Safe in a way the same trick is not in `unionField`, because
+      // a lerp is only ever built over two volumes of the same size, box and band - the
+      // morph pair of one body - so neither child can be answering with an out-of-box
+      // bound while the other answers with a band reading.
       return d.vec2f(std.mix(sa.x, sb.x, k), std.min(sa.y, sb.y));
     },
     field: (p: d.v3f, mip: number) => {

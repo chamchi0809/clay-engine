@@ -148,6 +148,14 @@ export interface ShadingOptions {
 }
 
 /**
+ * How far past its own reported depth a shading point is pushed to escape a field it
+ * started inside. A conservative field understates depth, so escaping needs a little
+ * more than it admits to; a little is all, because overshooting is the same blind zone
+ * `bias` is kept small to avoid.
+ */
+const ESCAPE = 1.5;
+
+/**
  * Screen-space-free lighting queries: everything is a distance-field trace, which is
  * what let Claybook ship with no baked lighting, AO or shadows at all (slide 5).
  * Both queries are stochastic by design - one sample per pixel per frame plus
@@ -176,12 +184,35 @@ export function makeShading(field: TracedField, options: ShadingOptions = {}) {
   });
 
   /**
+   * Where a lighting ray actually starts: the shading point, nudged out along its normal.
+   *
+   * `bias` alone is the usual reason - a surface must not shadow itself on its own
+   * quantisation. The second term is for shading points that did not come from this
+   * field. A rasterised soft body draws its own mesh into the g-buffer while
+   * contributing a *splatted shell* to the field, and that shell is a band roughly a
+   * particle radius thick straddling the mesh, because the particles are the mesh
+   * vertices. So a body pixel starts a full radius inside the field, every ray it casts
+   * reports an immediate hit, and the body renders solid black - shadowed and occluded
+   * by itself. Stepping out by however deep the point actually is puts it back on a
+   * surface; `ESCAPE` is the margin that stops the very next sample landing inside
+   * again, since a conservative reading understates depth rather than overstating it.
+   *
+   * One mip-0 sample per query, and a no-op wherever the g-buffer point came from the
+   * field - which is every traced surface in the scene.
+   */
+  const startOf = (p: d.v3f, n: d.v3f) => {
+    'use gpu';
+    const bias = field.voxelWorld(0) * biasVoxels;
+    const inside = std.max(std.neg(field.sample(p, 0).x), 0);
+    return p + n * (bias + inside * ESCAPE);
+  };
+
+  /**
    * Cone-traced ambient occlusion along the normal (slide 35). One jittered cone per
    * pixel; the temporal filter turns the noise into a smooth long-range term.
    */
   const coneAO = (p: d.v3f, n: d.v3f, seed: number) => {
     'use gpu';
-    const bias = field.voxelWorld(0) * biasVoxels;
     const r = hash3(seed);
     // Cosine-weighted over the hemisphere: that is the weighting the AO integral
     // actually wants, so the per-pixel mean converges to the right value. Jittering a
@@ -192,7 +223,7 @@ export function makeShading(field: TracedField, options: ShadingOptions = {}) {
     // Start *at* the offset origin. Also skipping the first `bias` of the ray would
     // blind the cone to everything within ~2 voxels - exactly the contact region AO
     // exists to darken.
-    const hit = aoTracer.cone(p + n * bias, dir, d.f32(0), aoDistance, aoAperture);
+    const hit = aoTracer.cone(startOf(p, n), dir, d.f32(0), aoDistance, aoAperture);
     // Contact at t=0 is fully occluded, escaping the interval is fully open.
     return std.select(d.f32(1), std.clamp(hit.t / aoDistance, 0, 1), hit.hit === 1);
   };
@@ -219,7 +250,6 @@ export function makeShading(field: TracedField, options: ShadingOptions = {}) {
     seed: number,
   ) => {
     'use gpu';
-    const bias = field.voxelWorld(0) * biasVoxels;
     const r = hash3(seed);
     // Uniform point on the light's disc, as an angular offset from `dir`.
     const up = std.select(d.vec3f(1, 0, 0), d.vec3f(0, 1, 0), std.abs(dir.y) < 0.9);
@@ -230,7 +260,7 @@ export function makeShading(field: TracedField, options: ShadingOptions = {}) {
     const jittered = std.normalize(
       dir + tx * (rad * std.cos(a)) + ty * (rad * std.sin(a)),
     );
-    const hit = shadowTracer.ray(p + n * bias, jittered, d.f32(0), tMax);
+    const hit = shadowTracer.ray(startOf(p, n), jittered, d.f32(0), tMax);
     return std.select(d.f32(1), d.f32(0), hit.hit === 1);
   };
 
@@ -245,8 +275,7 @@ export function makeShading(field: TracedField, options: ShadingOptions = {}) {
    */
   const hardShadow = (p: d.v3f, n: d.v3f, dir: d.v3f, tMax: number) => {
     'use gpu';
-    const bias = field.voxelWorld(0) * biasVoxels;
-    const hit = shadowTracer.ray(p + n * bias, dir, d.f32(0), tMax);
+    const hit = shadowTracer.ray(startOf(p, n), dir, d.f32(0), tMax);
     return std.select(d.f32(1), d.f32(0), hit.hit === 1);
   };
 
@@ -258,8 +287,7 @@ export function makeShading(field: TracedField, options: ShadingOptions = {}) {
    */
   const axisAO = (p: d.v3f, n: d.v3f) => {
     'use gpu';
-    const bias = field.voxelWorld(0) * biasVoxels;
-    const hit = aoTracer.cone(p + n * bias, n, d.f32(0), aoDistance, fixedAperture);
+    const hit = aoTracer.cone(startOf(p, n), n, d.f32(0), aoDistance, fixedAperture);
     return std.select(d.f32(1), std.clamp(hit.t / aoDistance, 0, 1), hit.hit === 1);
   };
 
@@ -278,6 +306,38 @@ export const fresnelSchlick = (cosTheta: number, f0: number) => {
   'use gpu';
   const c = std.clamp(1 - cosTheta, 0, 1);
   return f0 + (1 - f0) * (c * c) * (c * c) * c;
+};
+
+/**
+ * Fraction of a bounce that survives, in {@link shadeAmbient}. Well under one because the
+ * surface the light bounced off is itself half in shadow - it is in the same crevice.
+ */
+const BOUNCE = 0.25;
+
+/**
+ * The ambient half of the lighting: sky light, occluded by `ao`, plus the one bounce that
+ * occlusion implies.
+ *
+ * Scaling ambient by `ao` alone treats the term as pure sky, and taking it to zero in a
+ * fully enclosed spot is right for sky - a point in a crevice sees none. But it is not the
+ * only light arriving there. What that point *does* see is the crevice, so it gets one
+ * bounce off the very surfaces `ao` just counted as occluders, and that light grows as the
+ * sky's share shrinks. Hence `1 - ao`, and the albedo twice: once for the surface the light
+ * left, once for the one it lands on. A contact between two clay bodies goes warm and dim
+ * instead of going out.
+ *
+ * Without it, `direct` and `ambient * ao` reach zero at the same places, and there is one
+ * configuration where they always do: a body resting on the floor, inside its own sun
+ * shadow and inside its own contact. A clay ball on a pink clay plate put a band of exactly
+ * `rgb(0, 0, 0)` there, fifteen pixels wide with `rgb(51, 35, 33)` on one side of it and
+ * `rgb(202, 167, 152)` on the other - a hole in the floor rather than a contact shadow.
+ * Nothing was wrong with the occlusion value; the scene simply had no other light to offer.
+ *
+ * {@link BOUNCE} is how much of a bounce survives.
+ */
+export const shadeAmbient = (albedo: d.v3f, ambient: d.v3f, ao: number) => {
+  'use gpu';
+  return albedo * ambient * (ao + albedo * (BOUNCE * (1 - ao)));
 };
 
 /** Lambert + GGX-ish specular. Enough for clay; swap out per game. */

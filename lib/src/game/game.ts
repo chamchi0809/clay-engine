@@ -25,6 +25,14 @@ import { probeField } from './probe.ts';
 import { Sun, type SunSpawnOptions } from './sun.ts';
 import type { Entity, EntityContext } from './entity.ts';
 
+/**
+ * Bind groups the lighting pass spends on things that are not fields: the `(shadow, ao)`
+ * pass reads the g-buffer's normal/distance targets from one, and its camera and light
+ * uniforms land in the automatic catch-all group. Everything left of the device's limit
+ * is what the scene's occluders get to share.
+ */
+const LIGHTING_GROUPS = 2;
+
 export interface GameOptions {
   canvas: HTMLCanvasElement;
   /**
@@ -323,6 +331,22 @@ export class Game {
     return this.merge(this.tracedMembers().filter((e) => (e.transparent === true) === want));
   }
 
+  /**
+   * What the shadow and AO rays see: the opaque layer, plus anything that draws its own
+   * pixels but still wants to be part of the lighting.
+   *
+   * Not the same set as {@link layerField}, and that is the point. A shadow ray does not
+   * ask what drew a pixel, only whether something stands in the way, so a rasterised soft
+   * body belongs here even though the marcher never traces it - otherwise the body has no
+   * shadow, no contact darkening, and looks pasted onto the scene rather than resting in
+   * it. Transparent objects stay out for the reason {@link rebuild} gives.
+   */
+  shadingField(): TracedField {
+    return this.merge(
+      this.members.filter((e) => e.transparent !== true && (e.occluder ?? e.traced !== false)),
+    );
+  }
+
   /** True when anything at all is drawn into the transparency layer. */
   private get hasTransparent(): boolean {
     return this.members.some((e) => e.transparent === true);
@@ -534,7 +558,21 @@ export class Game {
       ...this.options.tracer,
       paletteCount: this.paletteCount,
     });
-    this.resolve = new DeferredResolve(this.root, field, camera.camera.uniform, sun.uniform, this.palette, {
+    // The lighting pass binds its own inputs plus one group per field, and a driver that
+    // runs out of bind groups says so in terms of nothing in this API. Say it here instead,
+    // where the entity that pushed it over the edge is still nameable.
+    const shading = this.shadingField();
+    const budget = this.root.device.limits.maxBindGroups - LIGHTING_GROUPS;
+    if (shading.groups.length > budget) {
+      const names = this.members
+        .filter((e) => e.field && e.transparent !== true && (e.occluder ?? e.traced !== false))
+        .map((e) => e.constructor.name);
+      throw new Error(
+        `Game: ${shading.groups.length} fields cast shadows (${names.join(', ')}) but this device allows ${budget}. `
+          + 'Set `occluder = false` on the ones that do not need to, or bake several of them into one volume.',
+      );
+    }
+    this.resolve = new DeferredResolve(this.root, shading, camera.camera.uniform, sun.uniform, this.palette, {
       ...this.options.shading,
       transparent,
       paletteCount: this.paletteCount,

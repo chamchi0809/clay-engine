@@ -10,6 +10,7 @@ import {
   DirLight,
   fresnelSchlick,
   makePaletteSampler,
+  shadeAmbient,
   shadeDirect,
   type MaterialPalette,
 } from '../trace/shade.ts';
@@ -213,7 +214,7 @@ export class TransparentComposite {
         // water is not weaker for the water being clear - passing zero albedo through the
         // same BRDF is the specular term on its own.
         const spec = shadeDirect(n, std.neg(dir), toLight, d.vec3f(), m.roughness) * sun;
-        const diffuse = m.albedo * (INV_PI * ndl) * sun + m.albedo * ambientVec * ao;
+        const diffuse = m.albedo * (INV_PI * ndl) * sun + shadeAmbient(m.albedo, ambientVec, ao);
 
         const opacity = std.clamp(m.opacity, 0, 1);
         const body = std.mix(transmitted, diffuse, opacity);

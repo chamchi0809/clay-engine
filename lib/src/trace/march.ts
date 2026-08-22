@@ -105,6 +105,8 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
     const invGrowth = 1 / (1 + aperture);
     const minStep = field.voxelWorld(0) * minStepVoxels;
     const hitEps = field.voxelWorld(minMip) * hitEpsVoxels;
+    /** Reciprocal of the travel over which `hitEps` ramps to full size. See below. */
+    const invEpsRamp = 1 / std.max(2 * hitEps, 1e-6);
     // Nothing before this can be touched, so nothing before it is worth sampling. For a
     // field with no bounds of its own this is `tMin` and the loop is unchanged.
     const tStart = startAt(ro, rd, tMin, radius, aperture);
@@ -131,8 +133,21 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
       const safe = dist - INTERP_SLACK * (field.voxelWorld(mip) - field.voxelWorld(minMip));
 
       // Tangency target for this sweep kind: 0 for a ray, `radius` for a sphere sweep,
-      // `aperture * t` for a cone. `hitEps` is what makes a zero-radius ray terminate.
+      // `aperture * t` for a cone.
       const target = radius + aperture * t;
+      // `hitEps` is what makes a zero-radius ray terminate, but it is also a world-space
+      // radius, and near `tStart` it is a radius around the *origin* rather than around
+      // anything the sweep has travelled to. A ray or a thin cone leaving a shading point
+      // then answers "is the origin near a surface" - the same answer for every direction,
+      // including the ones pointing away. A floor point beside a ball resting on it is
+      // within `hitEps` of the ball while still seeing most of its hemisphere, so every AO
+      // cone it cast came back hit at t=0 and the contact went hard black; the same reading
+      // put a black ring in the shadow term. Ramping the threshold in over the first couple
+      // of thresholds' worth of travel keeps the convergence guarantee - a ray closing on a
+      // surface is long past the ramp - while letting the direction decide again near the
+      // origin. `radius` is deliberately *not* ramped: a sphere sweep that starts already
+      // overlapping is a contact, and reporting it at t=0 is the whole point of the query.
+      const eps = hitEps * std.min((t - tStart) * invEpsRamp, 1);
       // The discount can swallow a coarse level's whole reading, and then the step below
       // collapses to `minStep` and the trace crawls. A saturated *texture* sample can never
       // do that - a band is four voxels wide, so `safe` there is at least three of them -
@@ -147,7 +162,7 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
       // A saturated sample means "at least a full band of empty space", so it can never
       // be a surface. That is also what keeps a field's conservative bounds (the volume
       // box in `volumeField`) from reading as geometry: they report saturation.
-      if (safe < target + hitEps && s.y < 0.999) {
+      if (safe < target + eps && s.y < 0.999) {
         if (mip >= hitMip) {
           // A coarse level's band is 2^mip times wider, so "close" there is only a
           // maybe. Drop two levels and step back half a voxel of the finer level
@@ -182,8 +197,20 @@ export function makeTracer(field: TracedField, options: TracerOptions = {}) {
 
       if (s.y >= 0.999) {
         // Saturated: at least a full band of empty space here, so a coarser level
-        // (band twice as wide) is safe and steps twice as far.
-        mip = std.min(mip + 2, d.f32(startMip));
+        // (band twice as wide) is safe and steps twice as far - provided the reading
+        // survives that level's discount. For one volume it always does, because a
+        // saturated reading *is* four voxels and the discount is under three. For a
+        // union it need not: a small volume answers points outside its box with the
+        // distance to that box, saturated, and a unit of it is nothing next to the
+        // coarsest level of a volume sixteen times the size. Hopping up regardless put
+        // the loop in a cycle - up, read a distance too small for the level, drop two
+        // levels and half a voxel back, step the half voxel, up again - which burns the
+        // whole budget without moving. The condition below is the same one the hop
+        // *down* uses, asked of the level being hopped to.
+        const up = std.min(mip + 2, d.f32(startMip));
+        if (dist > INTERP_SLACK * (field.voxelWorld(up) - field.voxelWorld(minMip))) {
+          mip = up;
+        }
       }
 
       if (t > tMax) {

@@ -62,11 +62,12 @@ export interface Entity {
   /** The game it belongs to. {@link GameObject} sets this for you. */
   readonly game: Game;
   /**
-   * This entity as a signed distance field. Two independent roles, hence two flags:
-   * {@link traced} decides whether the renderer draws it, {@link collidable} whether
-   * anything else can hit it. A rasterised body is collidable but not traced; a fluid is
-   * traced but not collidable *by itself*. {@link transparent} is a third, independent
-   * axis: which layer it is drawn into.
+   * This entity as a signed distance field. Three independent roles, hence three flags:
+   * {@link traced} decides whether the renderer draws it, {@link occluder} whether it
+   * shows up in anyone's lighting, {@link collidable} whether anything else can hit it.
+   * A rasterised body is collidable and an occluder but not traced; a fluid is traced but
+   * not collidable *by itself*. {@link transparent} is a fourth, independent axis: which
+   * layer it is drawn into.
    */
   readonly field?: TracedField | null;
   /**
@@ -77,6 +78,22 @@ export interface Entity {
    * every primary, shadow and AO ray, and WebGPU allows four bind groups in total.
    */
   readonly traced?: boolean;
+  /**
+   * Whether {@link field} casts shadows and occludes ambient light. Defaults to
+   * {@link traced}, which is what a game expects: a thing you can see is a thing that
+   * has a shadow.
+   *
+   * It is a separate flag because the two roles come apart for anything that draws itself
+   * with {@link drawGeometry}. Such an object is not traced - its pixels come from a
+   * rasteriser, not the marcher - but a shadow ray does not care where a pixel came from,
+   * only whether something is in the way, and a soft body with no shadow reads as
+   * hovering above the floor it is sitting on. Setting this leaves the primary trace
+   * alone and adds the field to the one the shadow and AO rays see.
+   *
+   * The same cost warning as {@link traced} applies, on the same budget: an occluder that
+   * is not traced is one more bind group on the lighting pass.
+   */
+  readonly occluder?: boolean;
   /**
    * Whether other things should collide with {@link field}. Default true. A fluid sets
    * it false: its own bake is not something to bounce off, it is the fluid itself.

@@ -11,6 +11,7 @@ import {
   DirLight,
   makePaletteSampler,
   makeShading,
+  shadeAmbient,
   shadeDirect,
   type MaterialPalette,
   type ShadingOptions,
@@ -242,7 +243,7 @@ export class DeferredResolve {
                 const qm = samplePalette(std.round(qa.w * 255));
                 const qlit = shadeDirect(std.normalize(qn.xyz), std.neg(dir), toLight, qa.xyz, qm.roughness)
                     * (l.color * (l.intensity * ql.x))
-                  + qa.xyz * ambientVec * ql.y
+                  + shadeAmbient(qa.xyz, ambientVec, ql.y)
                   + qm.emissive;
                 m1 = m1 + qlit;
                 m2 = m2 + qlit * qlit;
@@ -256,7 +257,7 @@ export class DeferredResolve {
 
         const direct = shadeDirect(n, std.neg(dir), toLight, alb.xyz, m.roughness)
           * (l.color * (l.intensity * shadow));
-        const lit = direct + alb.xyz * ambientVec * ao + m.emissive;
+        const lit = direct + shadeAmbient(alb.xyz, ambientVec, ao) + m.emissive;
 
         // --- temporal accumulation ---------------------------------------------
         const prevClip = c.prevViewProj * d.vec4f(p, 1);
@@ -329,13 +330,17 @@ export class DeferredResolve {
     p.draw(3);
   }
 
-  /** `pass` must have `color` bound to the presented view and `history` to the target slot. */
+  /**
+   * `pass` must have `color` bound to the presented view and `history` to the target slot.
+   *
+   * No field groups here, unlike {@link drawLighting}: this pass traces nothing. It reads
+   * the g-buffer, the filtered `(shadow, ao)` and the palette, and every distance-field
+   * query was already spent by the pass above. Binding the field anyway cost two of the
+   * four bind groups a device guarantees, for shaders that never touch them - which is
+   * exactly the budget a second occluder needs.
+   */
   draw(pass: TgpuRenderCommands, gbufferGroup: TgpuBindGroup, lightGroup: TgpuBindGroup): void {
-    let p = this.pipeline.with(pass).with(gbufferGroup).with(lightGroup);
-    for (const g of this.field.groups) {
-      p = p.with(g);
-    }
-    p.draw(3);
+    this.pipeline.with(pass).with(gbufferGroup).with(lightGroup).draw(3);
   }
 }
 

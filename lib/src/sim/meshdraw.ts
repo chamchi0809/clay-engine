@@ -26,10 +26,11 @@ export interface ParticleMeshOptions {
  * so it is smooth, and shape matching already gives the rigid part of the deformation
  * for free.
  *
- * ponytail: the mesh is not fed back into the traced field, so a clay body receives
- * world shadows and AO but casts none, and does not occlude itself. The upgrade path is
- * the same sparse bake the fluid uses - splat particles into a volume and `unionField`
- * it with the world.
+ * The mesh itself never reaches the traced field, but the body's splat bake does: it is
+ * an `Entity.occluder`, so shadow and AO rays see the body even though primary rays only
+ * ever see these triangles. Cast shadows and self-occlusion therefore come at collider
+ * resolution - which is the resolution those two rays were always allowed to use - while
+ * the silhouette stays as sharp as the rasteriser draws it.
  */
 export class ParticleMesh {
   private readonly pipeline: TgpuRenderPipeline;

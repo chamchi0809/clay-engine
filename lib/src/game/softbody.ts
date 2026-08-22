@@ -91,18 +91,27 @@ export class SoftBody extends GameObject {
   /** Conservative radius of the rest shape. Sizes everything else. */
   readonly radius: number;
   /**
-   * This body as a distance field, re-baked from its particles every frame - a collider,
-   * not a picture. {@link traced} is false because the body draws itself as triangles.
+   * This body as a distance field, re-baked from its particles every frame - a collider
+   * and an occluder, not a picture. {@link traced} is false because the body draws itself
+   * as triangles.
    */
   readonly field: TracedField;
   /**
    * The particles *are* the mesh vertices, so the body rasterises in one indirect draw
    * and deformation costs nothing on the render side. Tracing it instead would need a
-   * render-resolution bake every frame plus an extra texture sample on every primary,
-   * shadow and AO ray in the scene - which is why Claybook rasterised its clay too
-   * (GDC'18 slides 45-47) and only ray-traced the fluid.
+   * render-resolution bake every frame plus an extra texture sample on every primary ray
+   * in the scene - which is why Claybook rasterised its clay too (GDC'18 slides 45-47)
+   * and only ray-traced the fluid.
    */
   readonly traced = false;
+  /**
+   * The bake is a collider anyway, so shadows and AO come almost free - and without them
+   * a body is lit as if nothing else in the scene existed: no shadow on the floor, no
+   * darkening where it meets a wall, no occlusion of its own concavities. Cheap because
+   * shadow and AO rays are the two that were already allowed to be coarse (slide 35),
+   * which is exactly what a collider-resolution bake is.
+   */
+  readonly occluder = true;
   /**
    * Decided at construction, because it selects which G-buffer pass this body's draw is
    * recorded into and the game reads it before `build` runs.
@@ -232,10 +241,15 @@ export class SoftBody extends GameObject {
     //  - splat radius > half the worst gap between extracted particles, or the shell
     //    has holes (surface nets emits one particle per straddling cell, so the worst
     //    case is a body-diagonal step);
-    //  - voxel < splat radius, or the union of spheres never crosses zero at a voxel
-    //    centre and the body simply is not there;
+    //  - voxel < splat radius, or the splats never cross zero at a voxel centre and the
+    //    body simply is not there;
     //  - band * voxel > the radius any collider tests with, or the saturated reading
     //    outside the band *is* a false contact. See `SplatField`.
+    // The radius used to be a fourth constraint pulling the other way, because it also
+    // set how far outside the particles the shell landed - and the particles are the mesh
+    // vertices, so the occluder outgrew the thing being drawn. `bodyCloud` supplies
+    // normals, so the shell now passes through the particles and the radius only has to
+    // satisfy the three above.
     const cell = this.box / this.resolution;
     this.surface = new SplatField(root, bodyCloud(this.set, this.body), {
       radius: cell * 1.15,

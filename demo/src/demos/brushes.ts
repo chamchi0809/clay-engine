@@ -1,5 +1,6 @@
 import { Game, orbit, sdf } from '@clay/engine';
-import { hexPrism, rock, TETRA_OBJ } from './shapes.ts';
+import type { DemoStart } from '../shell.ts';
+import { hexPrism, rock, TETRA_OBJ } from './brush-shapes.ts';
 
 /**
  * Two ways to get a shape the engine does not ship.
@@ -15,15 +16,11 @@ import { hexPrism, rock, TETRA_OBJ } from './shapes.ts';
  * cutter in a `cut`.
  *
  * A game that only ever places spheres and boxes needs none of this, and there is a whole
- * separate demo of that. This is the escape hatch, and it is deliberately the only file in
- * the repository outside `lib/` that writes a line of GPU code.
+ * separate demo of that. This is the escape hatch, and it is deliberately the only demo
+ * that writes a line of GPU code.
  */
-const canvas = document.getElementById('view') as HTMLCanvasElement;
-const status = document.getElementById('status') as HTMLElement;
-const errorBox = document.getElementById('error') as HTMLElement;
-
-async function main() {
-  status.textContent = 'creating device…';
+export const start: DemoStart = async ({ canvas, status, hud }) => {
+  status('creating device…');
   const game = await Game.create({
     canvas,
     materials: {
@@ -41,7 +38,7 @@ async function main() {
     bounds: { size: 24, origin: [-12, -4, -12] },
   });
 
-  status.textContent = 'baking meshes…';
+  status('baking meshes…');
   // 80 triangles against 48^3 voxels, brute force, on the GPU. Both bakes together are a
   // few milliseconds - the await is here because the field has to exist before a shape
   // that references its slot can be built, not because it is slow.
@@ -89,6 +86,15 @@ async function main() {
   // `level.cut(sdf.mesh(stone).scale(0.6).at([0, 0, 0]).only('clay'))`.
   Object.assign(globalThis, { game, level, stone, spike, sdf });
 
+  // Nothing here is interactive, so the panel is a legend rather than a key list: which
+  // thing on screen came by which of the two routes.
+  hud([
+    ['columns', 'custom primitive — hexPrism, compiled into the brush fold'],
+    ['boulder', `baked mesh — ${stone.triangleCount} generated triangles`],
+    ['obelisk', `baked mesh — ${spike.triangleCount} triangles from an .obj`],
+    ['bite', 'the same baked mesh as a cutter, restricted to the clay'],
+  ]);
+
   let frames = 0;
   let lastReport = 0;
   let lastFrames = 0;
@@ -108,17 +114,10 @@ async function main() {
     const now = performance.now();
     if (now - lastReport > 400) {
       const fps = Math.round(((frames - lastFrames) * 1000) / (now - lastReport));
-      status.textContent = `${canvas.width}x${canvas.height} · ${fps} fps · `
-        + `1 custom primitive · 2 baked meshes (${stone.triangleCount} + ${spike.triangleCount} tris)`;
+      status(`${canvas.width}x${canvas.height} · ${fps} fps · `
+        + `1 custom primitive · 2 baked meshes (${stone.triangleCount} + ${spike.triangleCount} tris)`);
       lastReport = now;
       lastFrames = frames;
     }
   });
-}
-
-main().catch((e: unknown) => {
-  errorBox.style.display = 'grid';
-  errorBox.textContent = String(e instanceof Error ? (e.stack ?? e.message) : e);
-  status.textContent = 'failed';
-  throw e;
-});
+};

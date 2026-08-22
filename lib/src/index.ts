@@ -33,6 +33,14 @@ export type { CustomBrush } from './field/brush.ts';
 export { d, std } from './gpu.ts';
 /** For `game.loadMesh`. `parseObj` is exported so a game can inspect what it loaded. */
 export { parseObj, type BakedMesh, type MeshData } from './shape/mesh.ts';
+/**
+ * Triangle meshes with three.js's names and parameters, for `game.loadMesh`. Reach for
+ * `sdf` first - an analytic primitive is exact at every scale and costs no atlas slot -
+ * and for `geometry` when the shape has no closed form, or when a three.js scene is being
+ * ported across as it stands.
+ */
+export { geometry, signedArea, triangulateShape } from './shape/geometry.ts';
+export type { Shape2D, Vec2 } from './shape/polygon.ts';
 export type { TracedField } from './trace/field.ts';
 export type { ShadingOptions } from './trace/shade.ts';
 export type { TracerOptions } from './trace/march.ts';

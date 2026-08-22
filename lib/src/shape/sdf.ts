@@ -107,10 +107,25 @@ export const sdf = {
   /** Along Y. */
   cylinder: (radius: number, halfHeight: number) =>
     prim('cylinder', { size: [radius, halfHeight, radius] }),
+  /** Along Y, apex up: the base of radius `radius` sits at `-halfHeight`. */
+  cone: (radius: number, halfHeight: number) =>
+    prim('cone', { size: [radius, halfHeight, 0] }),
+  /** A cone with its point cut off. Along Y, `radiusBottom` at `-halfHeight`. */
+  cappedCone: (radiusBottom: number, radiusTop: number, halfHeight: number) =>
+    prim('cone', { size: [radiusBottom, halfHeight, radiusTop] }),
   /** Infinite horizontal half-space; everything below `y` is solid. */
   plane: (y = 0) => prim('plane', { radius: y }),
   boxFrame: (half: readonly [number, number, number], thickness: number) =>
     prim('boxFrame', { size: half, radius: thickness }),
+
+  // The platonic solids, each sized by its circumradius - the distance from the centre to a
+  // vertex - which is what three.js's geometries of the same name call `radius`. They are
+  // oriented the same way as those, so swapping one for the other moves nothing.
+  /** Corners on the axes, at `+-radius`. */
+  octahedron: (radius: number) => prim('octahedron', { size: radius }),
+  tetrahedron: (radius: number) => prim('tetrahedron', { size: radius }),
+  dodecahedron: (radius: number) => prim('dodecahedron', { size: radius }),
+  icosahedron: (radius: number) => prim('icosahedron', { size: radius }),
 
   /**
    * A primitive registered under `name` in `Game.create({ brushes })`. `size` and `radius`

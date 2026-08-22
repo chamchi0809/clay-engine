@@ -8,6 +8,7 @@ import {
   unionField,
   type MaterialSpec,
 } from '@clay/engine/core';
+import type { DemoStart } from '../shell.ts';
 
 /**
  * The same engine, no clay in sight.
@@ -20,9 +21,6 @@ import {
  * filter and temporal accumulation - because all of that is written against
  * `TracedField` and nothing else.
  */
-const canvas = document.getElementById('view') as HTMLCanvasElement;
-const status = document.getElementById('status') as HTMLElement;
-const errorBox = document.getElementById('error') as HTMLElement;
 
 const materials: MaterialSpec[] = [
   { albedo: [0.85, 0.86, 0.9], roughness: 0.6, emissive: [0, 0, 0], metallic: 0.0 },
@@ -30,7 +28,7 @@ const materials: MaterialSpec[] = [
   { albedo: [0.25, 0.62, 0.85], roughness: 0.15, emissive: [0, 0, 0], metallic: 0.6 },
 ];
 
-async function main() {
+export const start: DemoStart = async ({ canvas, status, hud }) => {
   const scene = await SdfScene.create({
     canvas,
     materials,
@@ -71,13 +69,19 @@ async function main() {
     shading: { aoDistance: 2.5 },
   });
 
+  hud([
+    ['fields', 'three analytic distance functions, unioned'],
+    ['volume', 'an 8³ stub — nothing here is ever voxelised'],
+    ['console', 'setTime(t) freezes or scrubs the animation'],
+  ]);
+
   const setTime = (globalThis as { setTime?: (t: number) => void }).setTime!;
   let frames = 0;
   let last = 0;
-  const start = performance.now();
+  const boot = performance.now();
 
   const loop = (now: number) => {
-    const t = (now - start) / 1000;
+    const t = (now - boot) / 1000;
     setTime(t);
     // Slow orbit, so the temporal filter has to reproject every pixel every frame.
     const r = 7.5;
@@ -86,16 +90,12 @@ async function main() {
     scene.render();
     frames++;
     if (now - last > 400) {
-      status.textContent = `${canvas.width}x${canvas.height} · ${Math.round((frames * 1000) / (now - last))} fps · analytic field, no volume`;
+      status(`${canvas.width}x${canvas.height} · `
+        + `${Math.round((frames * 1000) / (now - last))} fps · analytic field, no volume`);
       frames = 0;
       last = now;
     }
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
-}
-
-main().catch((err: unknown) => {
-  errorBox.style.display = 'grid';
-  errorBox.textContent = String(err instanceof Error ? (err.stack ?? err.message) : err);
-});
+};

@@ -5,10 +5,8 @@
   "packageManager": "pnpm@10.13.1",
   "scripts": {
     "dev": "pnpm --filter clay-demo dev",
-    "dev:analytic": "pnpm --filter clay-example-analytic dev",
-    "dev:brushes": "pnpm --filter clay-example-brushes dev",
-    "build": "pnpm --filter clay-demo build && pnpm --filter clay-example-analytic build && pnpm --filter clay-example-brushes build",
-    "typecheck": "tsc -p lib && tsc -p demo && tsc -p examples/analytic && tsc -p examples/brushes",
+    "build": "pnpm --filter clay-demo build",
+    "typecheck": "tsc -p lib && tsc -p demo",
     "test": "node --test \"lib/test/*.test.mjs\"",
     "test:gpu": "node lib/test/gpu/run.mjs",
     "check": "pnpm typecheck && pnpm test && pnpm test:gpu"

@@ -14,6 +14,8 @@ export const BakeParams = d.struct({
   triCount: d.u32,
   /** Where this slot starts along the atlas's Z axis, in voxels. */
   slotZ: d.u32,
+  /** {@link NormalizedMesh.shell}: half the surface thickness, in box units. */
+  shell: d.f32,
 });
 
 /** Voxels per workgroup axis. 4^3 = 64 threads, one voxel each. */
@@ -133,7 +135,7 @@ export class MeshBaker {
     const tris = root
       .createReadonly(d.arrayOf(Tri, this.maxTriangles))
       .$name('bakeTriangles');
-    const params = root.createUniform(BakeParams, { triCount: 0, slotZ: 0 });
+    const params = root.createUniform(BakeParams, { triCount: 0, slotZ: 0, shell: 0 });
     this.tris = tris;
     this.params = params;
 
@@ -164,10 +166,17 @@ export class MeshBaker {
         // wound the other way round - an exporter's choice, invisible until it bakes as
         // nothing at all - comes out solid instead of empty.
         const inside = std.abs(omega) > 2 * Math.PI;
+        // The solid, unioned with a slab of half-thickness `shell` either side of the
+        // surface. At `shell = 0` the union is a no-op and this is the plain signed
+        // distance. Above it, an open surface - which encloses nothing, so `inside` is
+        // false everywhere - comes out as exactly the slab, and a mesh that is *nearly*
+        // closed keeps the interior the winding number did find instead of hollowing out
+        // around its own holes.
+        const solid = std.select(dist, -dist, inside);
         std.textureStore(
           atlasWriteLayout.$.out,
           d.vec3u(gid.x, gid.y, gid.z + params.$.slotZ),
-          d.vec4f(std.select(dist, -dist, inside), 0, 0, 1),
+          d.vec4f(std.min(solid, dist - params.$.shell), 0, 0, 1),
         );
       }),
     });
@@ -202,7 +211,11 @@ export class MeshBaker {
       });
     }
     this.tris.write(packed);
-    this.params.write({ triCount: mesh.triangleCount, slotZ: slot * this.atlas.resolution });
+    this.params.write({
+      triCount: mesh.triangleCount,
+      slotZ: slot * this.atlas.resolution,
+      shell: mesh.shell,
+    });
 
     const groups = Math.ceil(this.atlas.resolution / BAKE_GROUP);
     this.pipeline.with(this.atlas.writeGroup).dispatchWorkgroups(groups, groups, groups);

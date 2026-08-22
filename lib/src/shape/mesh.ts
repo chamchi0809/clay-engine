@@ -34,6 +34,11 @@ export interface NormalizedMesh {
    * point crosses the wall, so it is at least `dBox` long before the wall and `inset` after.
    */
   inset: number;
+  /**
+   * Half the surface thickness, as a fraction of the half-extent - so in the same units as
+   * {@link NormalizedMesh.triangles}. Zero for an ordinary solid bake.
+   */
+  shell: number;
   /** Centre of the source mesh's bounding box, in its own units. */
   center: [number, number, number];
 }
@@ -66,8 +71,13 @@ export interface BakedMesh {
  * `fit` leaves the shape short of the box wall. Some margin is needed - the field just
  * inside the wall has to be positive, or there is no exterior for the tracer to approach
  * the surface through - and 0.9 costs 10% of the resolution on the widest axis to get it.
+ *
+ * `thickness` gives the *surface* a volume: half of it either side. A plane, a ring, an
+ * open lathe - anything a rasteriser is happy to draw and a distance field cannot represent,
+ * because a surface of zero thickness has no inside - becomes a slab it can. The box grows
+ * by half the thickness so the shell keeps the same margin the triangles would have had.
  */
-export function normalizeMesh(mesh: MeshData, fit = 0.9): NormalizedMesh {
+export function normalizeMesh(mesh: MeshData, fit = 0.9, thickness = 0): NormalizedMesh {
   const pos = mesh.positions;
   const idx = mesh.indices;
   const count = idx ? idx.length : pos.length / 3;
@@ -96,9 +106,18 @@ export function normalizeMesh(mesh: MeshData, fit = 0.9): NormalizedMesh {
   // for one cubic slot shape.
   const reach = Math.max(
     hi[0]! - center[0]!, hi[1]! - center[1]!, hi[2]! - center[2]!,
-  );
+  ) + thickness / 2;
   if (!(reach > 0)) {
     throw new Error('normalizeMesh: the mesh has no extent - every vertex is the same point');
+  }
+  // A mesh that is flat on some axis encloses nothing, so the winding number is zero
+  // everywhere and the slot bakes as empty space. That is a silently invisible object, and
+  // the fix is one option, so say so here rather than let it ship.
+  if (thickness <= 0 && [0, 1, 2].some((a) => hi[a]! - lo[a]! <= 0)) {
+    throw new Error(
+      'normalizeMesh: the mesh is flat, so it has no volume to bake. Pass `thickness` to '
+        + 'give the surface one - `game.loadMesh(mesh, { thickness: 0.05 })`.',
+    );
   }
   const half = reach / fit;
 
@@ -112,8 +131,9 @@ export function normalizeMesh(mesh: MeshData, fit = 0.9): NormalizedMesh {
     }
   }
   // `fit` sets the widest axis, so no vertex exceeds `fit` on any axis and the margin is
-  // guaranteed on all six walls, not just the two the widest axis touches.
-  return { triangles, triangleCount, half, inset: 1 - fit, center };
+  // guaranteed on all six walls, not just the two the widest axis touches. A shell eats
+  // into that margin by exactly `shell`, which is why `reach` paid for it up front.
+  return { triangles, triangleCount, half, inset: 1 - fit, shell: thickness / 2 / half, center };
 }
 
 /**

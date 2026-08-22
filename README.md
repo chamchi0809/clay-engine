@@ -9,15 +9,23 @@ Nothing is baked offline; the only per-frame CPU readback is one body's centre o
 
 ```
 pnpm install
-pnpm dev            # the Claybook clone            -> http://localhost:4173
-pnpm dev:analytic   # the "engine is general" demo  -> http://localhost:4174
-pnpm check          # typecheck (lib + demo + example) and run the unit tests
+pnpm dev            # every demo, behind a picker -> http://localhost:4173
+pnpm check          # typecheck (lib + demo) and run the unit tests
 ```
 
 Requires a browser with WebGPU (Chrome 113+, Safari 18+).
 
-`WASD` roll · `Space` hop · `1/2/3` morph ball/cube/rod · `Q` dig · `E` add clay ·
-`F` water on/off · `R` reset page · `N` next page · drag to orbit.
+One page, four demos, chosen from the select at the top left or with `#demo=`:
+
+| `#demo=` | What it shows |
+| --- | --- |
+| `clay` | The Claybook clone: rolling ball, morphing, digging, water that pools and erodes. |
+| `geometry` | Every geometry the engine can make, all at once, each baked mesh beside the exact primitive it overlaps with. |
+| `brushes` | A hand-written primitive and three baked meshes used as ordinary brushes. |
+| `analytic` | The same render path over three `@typegpu/sdf` fields. No volume, no brushes, no simulation. |
+
+In the Claybook clone: `WASD` roll · `Space` hop · `1/2/3` morph ball/cube/rod · `Q` dig ·
+`E` add clay · `F` water on/off · `R` reset page · `N` next page · drag to orbit.
 
 URL flags for diagnosing the renderer: `#debug=shadow|ao|normal|material|taa`,
 `#alpha=1` (temporal filter off), `#aoSteps=`, `#aoDistance=`, `#shadowSteps=`,
@@ -48,14 +56,12 @@ game.start(() => {
 });
 ```
 
-Four packages:
+Two packages:
 
 | Package | What it is |
 | --- | --- |
 | `lib` | `@clay/engine` - the engine. No game logic, no Claybook. |
-| `demo` | `clay-demo` - the Claybook clone: clay ball, morphing, digging, water, three pages. |
-| `examples/analytic` | The same render path over three hand-written `@typegpu/sdf` fields. No volume, no brushes, no simulation. |
-| `examples/brushes` | A primitive and two meshes the engine does not ship: `brushes`, `loadMesh`, `sdf.mesh`, and a baked mesh used as a cutter. |
+| `demo` | `clay-demo` - the page above. One file per demo under `demo/src/demos`, one shell around them all in `demo/src/shell.ts`. |
 
 ## Claybook features, and where they live
 
@@ -79,9 +85,9 @@ Sebastian Aaltonen's GDC 2018 talk is the reference; slide numbers are from that
 | Particle body rasterised into the traced G-buffer | 45 | `lib/src/sim/meshdraw.ts` |
 | Particles → SDF, `atomicMin` union of spheres, one splat per mip | 57-59 | `lib/src/sim/splat.ts` |
 | SPH fluid, baked back into an SDF and unioned with the world | 55-60 | `lib/src/sim/fluid.ts` |
-| Fluid erosion of the world | 60 | `Fluid.contacts()` + `demo/src/main.ts` |
+| Fluid erosion of the world | 60 | `Fluid.contacts()` + `demo/src/demos/clay.ts` |
 | Transparency: second G-buffer layer, screen-space refraction, Beer-Lambert | - | `lib/src/render/composite.ts` |
-| Puzzle pages: roll, squeeze, erode; goal pads | - | `demo/src/levels.ts` |
+| Puzzle pages: roll, squeeze, erode; goal pads | - | `demo/src/demos/levels.ts` |
 
 `SplatField` is the shared half of the last two rows. The fluid and the clay body bake
 themselves into an SDF through the same class, over a `ParticleCloud` of two GPU closures
@@ -274,10 +280,50 @@ Three decisions inside the bake:
 pipeline that bakes or edits a field - a few megabytes and one bind group - and a game with
 no baked meshes should not pay for either. Like `brushes`, it cannot be turned on later.
 
-Both live in `examples/brushes` (`pnpm dev:brushes`): a rounded hexagonal prism as a custom
+Both live in the `brushes` demo (`#demo=brushes`): a rounded hexagonal prism as a custom
 kind, a rock subdivided out of an icosahedron loaded from `{ positions, indices }`, a
 tetrahedron loaded from OBJ text, and that same tetrahedron pressed into a clay slab as the
-cutter of a `cut`. It is deliberately not in `demo`, which stays free of GPU vocabulary.
+cutter of a `cut`. It is the only demo that writes a line of GPU code; the others stay free
+of GPU vocabulary.
+
+### A surface has no inside
+
+A mesh does not have to be watertight, but it does have to enclose *something*: a plane, a
+disc or a wireframe encloses nothing, so it bakes to an empty field - correctly, and
+uselessly. `loadMesh(mesh, { thickness })` offsets the surface into a shell of that
+thickness instead, which is `min(signedSolid, dist - thickness / 2)` at every voxel. The
+`min` rather than a bare offset is deliberate: a *nearly* closed mesh keeps the interior the
+winding number found, instead of hollowing itself out around its holes.
+
+## three.js geometries
+
+`geometry.*` is three.js's whole catalogue - `BoxGeometry` through `WireframeGeometry`, same
+names, same parameters, same surface - handed back as `{ positions, indices }` for
+`loadMesh`. No normals and no UVs, because a distance field shades from its own gradient and
+takes its material from the brush, which is the two attributes three.js spends most of its
+generator code on.
+
+```ts
+const knot = await game.loadMesh(geometry.torusKnot({ radius: 1, tube: 0.3 }));
+level.shape = sdf.union(ground, sdf.mesh(knot).at([0, 2, 0]).material('stone'));
+```
+
+Reach for `sdf.*` first where it exists. `sdf.box`, `sphere`, `cylinder`, `capsule`,
+`torus`, `cone`, `cappedCone`, `octahedron`, `tetrahedron`, `dodecahedron` and
+`icosahedron` cover half the catalogue exactly, at every scale, for no atlas slot and no
+bake - and the platonic ones take three.js's `radius`, the circumradius, in three.js's
+orientation, so swapping one for the other moves nothing. `geometry` is for the shapes with
+no closed form worth writing - a torus knot, a lathed profile, an extruded outline, a
+subdivided polyhedron - and for a three.js scene being ported across as it stands.
+
+Two of the generators start from a 2D outline rather than a formula (`shape`, `extrude`) and
+run the same ear clipping with hole bridges three.js does; `triangulateShape` is exported for
+a game that wants it directly. `edges` and `wireframe` hand back solid rods rather than line
+lists, since a segment has no volume to bake.
+
+The `geometry` demo (`#demo=geometry`) is the whole catalogue at once, each baked mesh
+standing beside the exact primitive it overlaps with - forty-odd brushes fused into a single
+256³ field. `#pick=torusKnot` orbits one pair close up.
 
 ## The game API
 
@@ -340,7 +386,7 @@ render/  camera, G-buffer, the passes that turn a field into pixels
 sim/     particle physics that reads fields and writes back into them
 shape/   the declarative shape DSL - plain data, no GPU
 game/    Game, Entity, and the objects a game spawns
-scene.ts optional low-level wiring of trace/render/field, used by examples/analytic
+scene.ts optional low-level wiring of trace/render/field, used by the analytic demo
 gpu.ts   the re-exported TypeGPU surface, so a game needs exactly one dependency
 ```
 
@@ -367,7 +413,7 @@ extension mechanism:
 
 - The Claybook demo traces `unionField(worldVolume, fluidBake)`.
 - Its shape morph extracts particles from `lerpField(shapeA, shapeB, t)`.
-- `examples/analytic` traces `unionField(ground, unionField(blobs, arm))` and never
+- The `analytic` demo traces `unionField(ground, unionField(blobs, arm))` and never
   allocates a volume worth reading. Same shadows, same AO, same TAA, 120 fps.
 
 An entity is the same interface one level up:
@@ -402,7 +448,7 @@ allows four) and a texture sample on every primary, shadow and AO ray; `transpar
 a whole extra layer, and a scene with nothing see-through in it pays none of it.
 
 `SdfScene` is the same wiring one level down, for code that wants the pass order without
-the object model. `examples/analytic` uses it, and so does anyone tracing a field that is
+the object model. The `analytic` demo uses it, and so does anyone tracing a field that is
 not a game at all.
 
 ## Package boundaries
@@ -422,10 +468,10 @@ Two copies of TypeGPU resolved from two dependency declarations produce two sets
 schema objects that look identical and are not interchangeable, so the engine owns that
 dependency alone.
 
-`examples/analytic` is the one deliberate exception. It depends on `@typegpu/sdf` because
+The `analytic` demo is the one deliberate exception. It depends on `@typegpu/sdf` because
 it is playing the part of a third party bringing its own SDF primitives.
 
-`examples/brushes` keeps the rule and shows what it buys: it writes a distance function of
+The `brushes` demo keeps the rule and shows what it buys: it writes a distance function of
 its own, and it gets `d` and `std` from `@clay/engine` rather than from `typegpu`, which is
 exactly why its closure resolves against the same schema objects the engine's fold does.
 

@@ -12,7 +12,7 @@ import type { FieldGroups } from '../trace/field.ts';
  * runtime cost does not depend on total brush count, because the sparse tile grid only ever
  * loops over the brushes that touch a tile.
  *
- * The eight analytic kinds are the ones with a closed form worth hardcoding. `volume` is the
+ * The analytic kinds are the ones with a closed form worth hardcoding. `volume` is the
  * escape hatch for a shape that has none - a baked mesh - and reads a slot out of a
  * {@link BrushVolumeSource}. Anything else is a *custom kind*: see {@link BrushSet}.
  */
@@ -27,11 +27,17 @@ export const BuiltinBrushKind = {
   boxFrame: 7,
   /** Samples a baked SDF slot. Only present when the set was given an atlas. */
   volume: 8,
+  /** Capped cone along Y. `size` is (bottom radius, half height, top radius). */
+  cone: 9,
+  octahedron: 10,
+  tetrahedron: 11,
+  dodecahedron: 12,
+  icosahedron: 13,
 } as const;
 export type BuiltinBrushKindName = keyof typeof BuiltinBrushKind;
 
 /** First id handed out to a custom kind. */
-export const CUSTOM_KIND_BASE = 9;
+export const CUSTOM_KIND_BASE = 14;
 
 export const BrushOp = {
   /** Smooth union. */
@@ -193,6 +199,14 @@ function builtinBound(
       return sx + radius;
     case 'cylinder':
       return Math.hypot(sx, sy);
+    case 'cone':
+      return Math.hypot(Math.max(sx, sz), sy);
+    // The platonic solids all take a circumradius, so that is the reach by definition.
+    case 'octahedron':
+    case 'tetrahedron':
+    case 'dodecahedron':
+    case 'icosahedron':
+      return sx;
     case 'plane':
       // Infinite: never culled.
       return Number.POSITIVE_INFINITY;
@@ -201,6 +215,20 @@ function builtinBound(
       return sx * Math.sqrt(3);
   }
 }
+
+/** Golden ratio. The platonic solids are built out of it, as they always are. */
+const PHI = (1 + Math.sqrt(5)) / 2;
+const INV_PHI = PHI - 1;
+const INV_SQRT3 = 1 / Math.sqrt(3);
+/** Normalises `(0, phi, 1)` and its permutations - the dodecahedron's face normals. */
+const INV_ICO = 1 / Math.sqrt(1 + PHI * PHI);
+/**
+ * Inradius as a fraction of the circumradius, for the dodecahedron and the icosahedron.
+ *
+ * One number for both, because they are duals: each one's faces point where the other's
+ * vertices are, and the two ratios come out of the same expression.
+ */
+const PLATONIC_INRADIUS = Math.sqrt((5 + 2 * Math.sqrt(5)) / 15);
 
 /**
  * The analytic primitives. `volume` is absent on purpose - it needs an atlas, so it is
@@ -235,6 +263,84 @@ const evalAnalyticLocal = tgpu.fn([d.u32, d.vec3f, d.vec3f, d.f32], d.f32)(
     }
     if (kind === BuiltinBrushKind.boxFrame) {
       return sdf.sdBoxFrame3d(p, size, radius);
+    }
+    if (kind === BuiltinBrushKind.cone) {
+      // Quilez's exact capped cone. `size` is (bottom radius, half height, top radius); a
+      // plain cone is the same primitive with the top radius at zero, which is why there is
+      // one kind here and two constructors in `sdf`.
+      const q = d.vec2f(std.length(p.xz), p.y);
+      const k1 = d.vec2f(size.z, size.y);
+      const k2 = d.vec2f(size.z - size.x, 2 * size.y);
+      const ca = d.vec2f(
+        q.x - std.min(q.x, std.select(size.z, size.x, q.y < 0)),
+        std.abs(q.y) - size.y,
+      );
+      const cb = q - k1 + k2 * std.clamp(std.dot(k1 - q, k2) / std.max(std.dot(k2, k2), 1e-20), 0, 1);
+      // Inside iff it is behind the slanted side *and* between the two caps.
+      const s = std.select(1, -1, cb.x < 0 && ca.y < 0);
+      return s * std.sqrt(std.min(std.dot(ca, ca), std.dot(cb, cb)));
+    }
+    if (kind === BuiltinBrushKind.octahedron) {
+      // Quilez's exact octahedron: `size.x` is the distance from the centre to a vertex.
+      // The three tests pick which face's plane the point projects onto; past all of them it
+      // is over a face's interior and the plane distance is the answer outright.
+      const a = std.abs(p);
+      const m = a.x + a.y + a.z - size.x;
+      // A copy, not a reference: a `let` that aliases another value cannot be reassigned.
+      let q = d.vec3f(a);
+      if (3 * a.x < m) {
+        q = d.vec3f(a);
+      } else if (3 * a.y < m) {
+        q = d.vec3f(a.y, a.z, a.x);
+      } else if (3 * a.z < m) {
+        q = d.vec3f(a.z, a.x, a.y);
+      } else {
+        return m * INV_SQRT3;
+      }
+      const k = std.clamp(0.5 * (q.z - q.y + size.x), 0, size.x);
+      return std.length(d.vec3f(q.x, q.y - size.x + k, q.z - k));
+    }
+    // The three remaining platonic solids are the greatest of their face planes, each one
+    // written as a unit normal dotted with the point. That is exact inside the solid and a
+    // lower bound outside it - near an edge the true distance is longer than any single
+    // plane's - which is all a sphere tracer needs, and it is 1-Lipschitz either way. An
+    // exact exterior would mean projecting onto edges and vertices, for a difference no
+    // wider than a corner.
+    //
+    // The vertex sets are three.js's, so the analytic solid and the generated mesh of the
+    // same name sit in the same orientation.
+    if (kind === BuiltinBrushKind.tetrahedron) {
+      const m = std.max(
+        std.max(-p.x - p.y - p.z, -p.x + p.y + p.z),
+        std.max(p.x - p.y + p.z, p.x + p.y - p.z),
+      ) * INV_SQRT3;
+      // A regular tetrahedron's inradius is exactly a third of its circumradius.
+      return m - size.x / 3;
+    }
+    if (kind === BuiltinBrushKind.dodecahedron) {
+      // Twelve faces along `(0, +-phi, +-1)` and its cyclic shifts. Folding the point into
+      // the positive octant collapses the signs, so three dots do.
+      //
+      // Not `(0, +-1, +-phi)`, which is the tempting one to write and is the *mirror*
+      // family: it is a perfectly good dodecahedron, turned a tenth of a turn off the one
+      // three.js's vertex list describes. Nothing about it looks wrong on its own - only
+      // side by side with the generated mesh, which is where it was caught.
+      const q = std.abs(p);
+      const m = std.max(
+        std.max(PHI * q.y + q.z, q.x + PHI * q.z),
+        PHI * q.x + q.y,
+      ) * INV_ICO;
+      return m - size.x * PLATONIC_INRADIUS;
+    }
+    if (kind === BuiltinBrushKind.icosahedron) {
+      // Twenty faces along `(+-1, +-1, +-1)` and `(0, +-phi, +-1/phi)` cyclic, which fold
+      // down to four dots. Same mirror trap as the dodecahedron above.
+      const q = std.abs(p);
+      const m = std.max(
+        std.max(q.x + q.y + q.z, q.y * PHI + q.z * INV_PHI),
+        std.max(q.x * INV_PHI + q.z * PHI, q.x * PHI + q.y * INV_PHI),
+      ) * INV_SQRT3;
+      return m - size.x * PLATONIC_INRADIUS;
     }
     // An unknown kind reads as empty rather than as a surface at the origin: a set built
     // without an atlas must ignore a `volume` brush, not paint a blob where it was.
@@ -472,7 +578,7 @@ export class BrushSet {
 }
 
 /**
- * The eight analytic primitives and nothing else.
+ * The analytic primitives and nothing else.
  *
  * Used by anything that builds a field without a game around it - `SdfScene`, the fluid
  * bake - and as the default for every field-side class, so registering custom brushes is

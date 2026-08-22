@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Clay Engine - Claybook clone</title>
+    <title>Clay Engine</title>
     <style>
       :root { color-scheme: dark; }
       * { box-sizing: border-box; }
@@ -11,13 +11,22 @@
       body { font: 13px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e8ef; }
       #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
       #hud {
-        position: fixed; inset: 12px auto auto 12px; max-width: 22rem;
+        position: fixed; inset: 12px auto auto 12px; max-width: 24rem;
         padding: 10px 12px; border-radius: 8px;
         background: rgba(12, 12, 20, 0.62); backdrop-filter: blur(6px);
-        border: 1px solid rgba(255, 255, 255, 0.09); pointer-events: none;
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        /* The panel is a read-out; only the picker inside it is meant to be clicked, so
+           the canvas keeps every drag that is not aimed at the select. */
+        pointer-events: none;
       }
-      #hud h1 { margin: 0 0 4px; font-size: 14px; letter-spacing: 0.02em; }
-      #hud dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; margin: 6px 0 0; }
+      #hud h1 { margin: 0 0 6px; font-size: 14px; letter-spacing: 0.02em; }
+      #picker {
+        pointer-events: auto; width: 100%; padding: 4px 6px; border-radius: 6px;
+        background: #16161f; color: #e8e8ef; border: 1px solid rgba(255, 255, 255, 0.14);
+        font: inherit;
+      }
+      #blurb { margin: 6px 0 0; color: #9aa0b4; }
+      #hud dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; margin: 8px 0 0; }
       #hud dt { color: #9aa0b4; }
       #hud dd { margin: 0; }
       #status { position: fixed; inset: auto auto 12px 12px; color: #9aa0b4; }
@@ -32,6 +41,8 @@
     <canvas id="view"></canvas>
     <div id="hud">
       <h1>Clay Engine</h1>
+      <select id="picker" aria-label="demo"></select>
+      <p id="blurb"></p>
       <dl id="keys"></dl>
     </div>
     <div id="status">booting…</div>

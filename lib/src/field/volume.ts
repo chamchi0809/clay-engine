@@ -34,13 +34,19 @@ export const LevelParams = d.struct({
 });
 
 export interface SdfVolumeOptions {
-  /** Mip-0 voxel resolution per axis. Must be a multiple of `TILE * 2^(mipLevels-1)`. */
+  /**
+   * Mip-0 voxel resolution per axis. Any multiple of `TILE` works on its own; pairing it
+   * with an explicit `mipLevels` additionally requires a multiple of `TILE * 2^(mipLevels-1)`.
+   */
   resolution?: number;
   /** World-space edge length covered by the volume. */
   worldSize?: number;
   /** World position of the minimum corner. */
   origin?: readonly [number, number, number];
-  /** Number of mip levels; each halves the resolution. */
+  /**
+   * Number of mip levels; each halves the resolution. Defaults to as many as the
+   * resolution can actually carry - see the constructor.
+   */
   mipLevels?: number;
   /** Stored band half-width in voxels (Claybook used 4). */
   band?: number;
@@ -132,7 +138,17 @@ export class SdfVolume {
 
   constructor(root: TgpuRoot, options: SdfVolumeOptions = {}) {
     const resolution = options.resolution ?? 128;
-    const mipLevels = options.mipLevels ?? Math.max(1, Math.log2(resolution / TILE) | 0);
+    // Every level halves the resolution and still has to tile evenly, so the deepest
+    // usable chain is limited by how many times `resolution / TILE` is even - not just by
+    // its magnitude. Deriving the default from the magnitude alone made perfectly sound
+    // resolutions fail: 160 wants three levels (160 -> 80 -> 40, tiles 20 -> 10 -> 5), but
+    // log2(20) rounds to four, and the check then blamed the resolution for a mip count
+    // nobody asked for. Take the smaller of the two limits, so an explicit `mipLevels`
+    // is still checked but a bare `resolution` is always accepted.
+    let halvings = 0;
+    for (let n = resolution / TILE; Number.isInteger(n) && n % 2 === 0; n /= 2) halvings++;
+    const mipLevels = options.mipLevels
+      ?? Math.max(1, Math.min(Math.log2(resolution / TILE) | 0, halvings + 1));
     const worldSize = options.worldSize ?? 16;
     const band = options.band ?? 4;
     const origin = options.origin ?? [0, 0, 0];

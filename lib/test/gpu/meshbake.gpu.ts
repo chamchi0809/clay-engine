@@ -375,13 +375,22 @@ test('normalizeMesh keeps the aspect ratio and rejects degenerate input', () => 
   // The widest axis sets the scale for every axis, so a slab bakes as a slab. Scaling each
   // axis to fill the box independently would be the obvious thing and would silently
   // un-flatten every flat asset in a game.
-  const flat = normalizeMesh({
-    positions: new Float32Array([-4, -1, 0, 4, -1, 0, 0, 1, 0]),
+  const slab = normalizeMesh({
+    positions: new Float32Array([-4, -1, -0.5, 4, -1, 0.5, 0, 1, 0]),
   }, 1);
-  assert.equal(flat.triangleCount, 1);
-  near(flat.half, 4, 'the widest half-extent wins', 1e-6);
-  near(flat.triangles[0]!, -1, 'the wide axis fills the box', 1e-6);
-  near(flat.triangles[1]!, -0.25, 'the narrow one keeps its proportion', 1e-6);
+  assert.equal(slab.triangleCount, 1);
+  near(slab.half, 4, 'the widest half-extent wins', 1e-6);
+  near(slab.triangles[0]!, -1, 'the wide axis fills the box', 1e-6);
+  near(slab.triangles[1]!, -0.25, 'the narrow one keeps its proportion', 1e-6);
+  near(slab.shell, 0, 'no thickness asked for, no shell', 1e-6);
+
+  // A mesh with no extent at all on some axis encloses nothing, so it would bake as an
+  // empty slot - an object that loads, spawns and cannot be seen.
+  const flat = { positions: new Float32Array([-4, -1, 0, 4, -1, 0, 0, 1, 0]) };
+  assert.throws(() => normalizeMesh(flat), /flat/);
+  const shelled = normalizeMesh(flat, 1, 1);
+  near(shelled.half, 4.5, 'the box grows to hold the shell', 1e-6);
+  near(shelled.shell, 0.5 / 4.5, 'half the thickness, in box units', 1e-6);
 
   assert.throws(() => normalizeMesh({ positions: new Float32Array([0, 0, 0]) }), /at least one/);
   assert.throws(

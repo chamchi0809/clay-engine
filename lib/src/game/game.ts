@@ -83,6 +83,18 @@ export interface LoadMeshOptions {
    * box instead.
    */
   fit?: number;
+  /**
+   * Surface thickness, in the mesh's own units. Half of it lands either side of the
+   * triangles.
+   *
+   * A distance field needs a volume, and plenty of perfectly good geometry has none: a
+   * plane, a ring, an open lathe, an extrusion with no depth, anything a rasteriser draws
+   * as a single-sided sheet. Baking one of those without a thickness produces an empty
+   * slot, so it throws instead; with one, the sheet becomes a slab.
+   *
+   * A closed mesh does not need this and comes out slightly fattened if it gets one.
+   */
+  thickness?: number;
 }
 
 /**
@@ -212,7 +224,7 @@ export class Game {
       );
     }
     const data = typeof source === 'string' ? parseObj(source) : source;
-    const normalized = normalizeMesh(data, options.fit);
+    const normalized = normalizeMesh(data, options.fit, options.thickness);
     const slot = this.meshAtlas.allocate();
     await this.meshBaker.bake(slot, normalized);
     return {

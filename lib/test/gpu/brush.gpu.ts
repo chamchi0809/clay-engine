@@ -90,6 +90,113 @@ test('plane and box agree with their closed forms', async (t) => {
   near(box[2]!, 0, 'the corner is on the surface');
 });
 
+test('cone and capped cone agree with their closed forms', async (t) => {
+  if (!available) {
+    return t.skip('no WebGPU adapter');
+  }
+  // One kind, two constructors: `size` is (bottom radius, half height, top radius), and a
+  // plain cone is the capped one with the top at zero. Getting the triple's order wrong
+  // swaps the ends, which on a symmetric test point looks like nothing at all - hence the
+  // asymmetric radii below.
+  const cone = await evalAt(
+    { kind: 'cone', size: [1, 1, 0] },
+    [[0, 0, 0], [0, 1, 0], [0, 2, 0], [2, -1, 0]],
+  );
+  // The slanted side runs from the rim (1, -1) to the apex (0, 1); as a line it is
+  // `2*rho + y = 1` with unit normal `(2, 1)/sqrt(5)`, so the centre is 1/sqrt(5) inside it
+  // and only 1 above the base - the side wins.
+  near(cone[0]!, -1 / Math.sqrt(5), 'the centre is nearest the slanted side, not the base');
+  near(cone[1]!, 0, 'the apex is on the surface');
+  near(cone[2]!, 1, 'one unit above the apex');
+  near(cone[3]!, 1, 'out along the base plane, one unit past the rim');
+
+  const capped = await evalAt(
+    { kind: 'cone', size: [2, 1, 1] },
+    [[0, 0, 0], [1.5, 0, 0], [0, 0, 1.5]],
+  );
+  near(capped[0]!, -1, 'a 2-to-1 frustum is nearer its caps than its side');
+  near(capped[1]!, 0, 'halfway up, the side has contracted to radius 1.5');
+  near(capped[2]!, 0, 'and the same on Z: the primitive is a revolution, not a box');
+});
+
+/**
+ * The three max-of-planes solids: exact inside, a lower bound outside. Every probe below is
+ * on a face's interior or at the centre, which is where the bound is the exact distance -
+ * the one probe past a vertex is asserted as a bound and nothing more.
+ */
+const INRADIUS = Math.sqrt((5 + 2 * Math.sqrt(5)) / 15);
+const PHI = (1 + Math.sqrt(5)) / 2;
+
+/** `n * (inradius + d)`, i.e. `d` clear of the middle of the face `n` points at. */
+const offFace = (n: readonly [number, number, number], inradius: number, d: number) => {
+  const len = Math.hypot(n[0], n[1], n[2]);
+  const s = (inradius + d) / len;
+  return [n[0] * s, n[1] * s, n[2] * s] as [number, number, number];
+};
+
+test('the platonic solids take a circumradius and keep three.js orientation', async (t) => {
+  if (!available) {
+    return t.skip('no WebGPU adapter');
+  }
+  // `size.x` is the circumradius for all four, which is what three.js's geometries of the
+  // same name call `radius`. So every one of these is checked at a vertex of the matching
+  // `geometry.*` vertex list: if the analytic solid were turned even slightly off, the
+  // vertex would not read as zero. That is the assertion the docs are making.
+  const oct = await evalAt({ kind: 'octahedron', size: 1 }, [
+    [0, 0, 0], [1, 0, 0], [0, 0, -1], [2, 0, 0], [0.5, 0.5, 0],
+  ]);
+  near(oct[0]!, -1 / Math.sqrt(3), 'the centre is the inradius inside');
+  near(oct[1]!, 0, 'a vertex sits on an axis at the circumradius');
+  near(oct[2]!, 0, 'and on every axis, not just the first');
+  near(oct[3]!, 1, 'one unit out along a vertex direction');
+  near(oct[4]!, 0, 'the middle of an edge is on the surface too');
+
+  const tet = await evalAt({ kind: 'tetrahedron', size: 1 }, [
+    [0, 0, 0],
+    [1 / Math.sqrt(3), 1 / Math.sqrt(3), 1 / Math.sqrt(3)],
+    [-1 / Math.sqrt(3), -1 / Math.sqrt(3), 1 / Math.sqrt(3)],
+    offFace([1, 1, -1], 1 / 3, 0.5),
+  ]);
+  near(tet[0]!, -1 / 3, "a tetrahedron's inradius is a third of its circumradius");
+  near(tet[1]!, 0, 'three.js puts a vertex at (1, 1, 1) normalised');
+  near(tet[2]!, 0, 'and another at (-1, -1, 1)');
+  near(tet[3]!, 0.5, 'over the middle of a face the plane distance is the true distance');
+
+  // (0, 1/phi, phi) and cyclic, normalised - three.js's DodecahedronGeometry vertex list.
+  const dodec = await evalAt({ kind: 'dodecahedron', size: 1 }, [
+    [0, 0, 0],
+    [1 / Math.sqrt(3), 1 / Math.sqrt(3), 1 / Math.sqrt(3)],
+    [0, 1 / PHI / Math.sqrt(3), PHI / Math.sqrt(3)],
+    [PHI / Math.sqrt(3), 0, 1 / PHI / Math.sqrt(3)],
+    offFace([0, PHI, 1], INRADIUS, 0.5),
+  ]);
+  near(dodec[0]!, -INRADIUS, 'the centre is the inradius inside');
+  near(dodec[1]!, 0, 'the cube-corner vertices are on the surface');
+  near(dodec[2]!, 0, 'and so are the (0, 1/phi, phi) ones');
+  near(dodec[3]!, 0, 'and their cyclic shifts');
+  near(dodec[4]!, 0.5, 'over the middle of a face');
+
+  // (0, 1, phi) and cyclic, normalised - three.js's IcosahedronGeometry vertex list.
+  const v = 1 / Math.sqrt(1 + PHI * PHI);
+  const ico = await evalAt({ kind: 'icosahedron', size: 1 }, [
+    [0, 0, 0],
+    [0, v, PHI * v],
+    [v, PHI * v, 0],
+    offFace([1, 1, 1], INRADIUS, 0.5),
+    [0, 1.5 * v, 1.5 * PHI * v],
+  ]);
+  near(ico[0]!, -INRADIUS, "the icosahedron is the dodecahedron's dual, so same ratio");
+  near(ico[1]!, 0, 'a vertex at (0, 1, phi) normalised');
+  near(ico[2]!, 0, 'and its cyclic shift');
+  near(ico[3]!, 0.5, 'over the middle of a face');
+  // Half a unit out along a *vertex*, where the max-of-planes form stops being exact: every
+  // face plane through that vertex is tilted away from the ray, so the largest of them reads
+  // `0.5 * inradius` rather than 0.5. Under-reporting is the safe direction - a sphere tracer
+  // needs a lower bound on the distance, and it still gets one.
+  near(ico[4]!, 0.5 * INRADIUS, 'outside a vertex the bound is short of the true distance');
+  assert.ok(ico[4]! > 0 && ico[4]! < 0.5, 'but still positive, so the point reads as outside');
+});
+
 /**
  * A hex prism, the running example for a custom kind: `size.x` is the flat-to-flat radius,
  * `size.y` the half-height, and `radius` rounds the edges. Also the shape whose bound is
